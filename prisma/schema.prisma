@@ -22,7 +22,7 @@ model User {
 model Room {
   id            Int        @id @default(autoincrement())
   name          String
-  room_code     Int
+  room_code     Int       @unique
   // ownership
   createdById   Int
   createdBy     User       @relation("CreatedRooms", fields: [createdById], references: [id])

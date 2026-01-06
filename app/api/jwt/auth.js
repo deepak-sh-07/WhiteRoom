@@ -17,8 +17,10 @@ export function auth(req) {
   // 1️⃣ Try verifying access token
   if (accessToken) {
     try {
-      jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
-      return NextResponse.next(); // ✅ access token valid
+     const payload  = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
+      const res = NextResponse.next();
+      res.headers.set("x-user-id", payload.userId);
+      return res;
     } catch (err) {
       // access token expired → try refresh
     }
@@ -44,6 +46,7 @@ export function auth(req) {
 
     // Continue request with new token
     const res = NextResponse.next();
+    res.headers.set("x-user-id", payload.userId);
     res.cookies.set("accessToken", newAccessToken, {
       httpOnly: true,
       secure: true,

@@ -1,4 +1,5 @@
 "use client"
+import { redirect } from 'next/dist/server/api-utils';
 import React from 'react'
 import { useState } from 'react';
 export default function login(){
@@ -14,6 +15,10 @@ export default function login(){
         },
         body: JSON.stringify({ email, password }),
     })
+    const data = res.json();
+    if(data.status==200){
+      redirect("/");
+    }
   }
   const handleregister = ()=>{
     const res = fetch('http://localhost:3000/api/register',{
