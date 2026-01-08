@@ -1,35 +1,39 @@
 "use client"
 import { redirect } from 'next/dist/server/api-utils';
 import React from 'react'
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 export default function login(){
+  const router = useRouter();
     const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name,setName] = useState("");
   const [isLogin,setIsLogin] = useState(true);
-  const handlelogin = ()=>{
-    const res = fetch('http://localhost:3000/api/login',{
+  const handlelogin = async()=>{
+    const res = await fetch('http://localhost:3000/api/login',{
         method:'POST',
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ email, password }),
     })
-    const data = res.json();
-    if(data.status==200){
-      redirect("/");
-    }
+    const data = await res.json();
+    if (res.status === 200) {
+  router.push("/");
+}
   }
-  const handleregister = ()=>{
-    const res = fetch('http://localhost:3000/api/register',{
+  const handleregister = async()=>{
+    const res = await fetch('http://localhost:3000/api/register',{
       method:'POST',
       headers:{
         "Content-Type" : "application/json",
       },
       body: JSON.stringify({ name,email, password }),
     })
+    const data =  await res.json();
+    console.log(data.message);
   }
-
+  
   return(
     <>
     {

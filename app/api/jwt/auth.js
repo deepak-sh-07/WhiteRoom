@@ -54,7 +54,8 @@ export function auth(req) {
       path: "/",
       maxAge: 10 * 60, // 10 minutes
     });
-
+    const user = res.headers.set("x-user-id", payload.userId);
+    console.log(user);
     return res;
   } catch (err) {
     // ❌ Refresh token invalid / expired

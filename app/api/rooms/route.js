@@ -1,21 +1,44 @@
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
+import prisma from "@/lib/prisma";
 
+export async function POST(req) {
+  const headersList = await headers();
+  const userId = headersList.get("x-user-id");
 
-export async function POST(req){
-    const {name,room_code} = req.body();
-    const userId = headers().get("x-user-id");
-    const room = prisma.room.findmany({
-        where:{room_code}
-    })
-    if(room) return NextResponse.json({message:"Room already exist"} , {status:404});
+  if (!userId) {
+    return NextResponse.json(
+      { message: "Unauthorized" },
+      { status: 401 }
+    );
+  }
 
-    const createRoom = prisma.room.create({
-        data:{
-            name,
-            room_code,
-            createdById:userId,
-        }
-    })
-    return NextResponse.json({message:"room created"}, {status:200},{createRoom})
+  const { name, room_code } = await req.json();
+
+  const existingRoom = await prisma.room.findUnique({
+    where: { room_code },
+  });
+
+  if (existingRoom) {
+    return NextResponse.json(
+      { message: "Room already exists" },
+      { status: 409 }
+    );
+  }
+
+  const createRoom = await prisma.room.create({
+    data: {
+      name,
+      room_code,
+      createdById: userId,
+    },
+  });
+
+  return NextResponse.json(
+    {
+      message: "Room created",
+      room: createRoom,
+    },
+    { status: 201 }
+  );
 }
