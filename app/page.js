@@ -5,7 +5,7 @@ export default function Home() {
   const [name,setName] = useState("");
   const [room_code,setRoom_code] = useState("");
   const createroom = async ()=>{
-    const res = await fetch("api/rooms",{
+    const res = await fetch("/api/rooms",{
       method:'POST',
         headers: {
           "Content-Type": "application/json",

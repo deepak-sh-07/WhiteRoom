@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
-import { headers } from "next/headers";
 import prisma from "@/lib/prisma";
 
 export async function POST(req) {
-  const headersList = await headers();
-  const userId = headersList.get("x-user-id");
-
+  const userId = Number(req.headers.get("x-user-id"));
+  console.log(userId);
   if (!userId) {
     return NextResponse.json(
       { message: "Unauthorized" },

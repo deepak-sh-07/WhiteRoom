@@ -2,7 +2,7 @@ import  prisma  from "@/lib/prisma";
 import { NextResponse } from "next/server";
 import {refresh_key,access_key} from "../jwt/jwt.js";
 import bcrypt from "bcrypt";
-import { cookies } from "next/headers";
+import { cookies} from "next/headers";
 export async function POST(req, res) {
   const body = await req.json();
   const cookieStore = await cookies();
@@ -31,7 +31,6 @@ export async function POST(req, res) {
   }
   const accessToken = access_key(user.id);
   const refreshToken = refresh_key(user.id);
-
  cookieStore.set("accessToken", accessToken, {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",

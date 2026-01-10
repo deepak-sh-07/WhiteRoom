@@ -6,62 +6,50 @@ export function auth(req) {
   const accessToken = req.cookies.get("accessToken")?.value;
   const refreshToken = req.cookies.get("refreshToken")?.value;
 
-  // ❌ No tokens at all → not authenticated
   if (!accessToken && !refreshToken) {
-    return NextResponse.json(
-      { message: "Unauthorized" },
-      { status: 401 }
-    );
+    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  // 1️⃣ Try verifying access token
+  // 1️ Access token
   if (accessToken) {
     try {
-     const payload  = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
-      const res = NextResponse.next();
-      res.headers.set("x-user-id", payload.userId);
-      return res;
-    } catch (err) {
-      // access token expired → try refresh
-    }
+      const payload = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
+
+      const headers = new Headers(req.headers);
+      headers.set("x-user-id", payload.userId);
+
+      return NextResponse.next({
+        request: { headers },
+      });
+    } catch {}
   }
 
-  // 2️⃣ Access token failed → try refresh token
+  // 2️ Refresh token
   if (!refreshToken) {
-    return NextResponse.json(
-      { message: "Unauthorized" },
-      { status: 401 }
-    );
+    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
   try {
-    // Verify refresh token
-    const payload = jwt.verify(
-      refreshToken,
-      process.env.JWT_REFRESH_KEY
-    );
-
-    // Create new access token
+    const payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_KEY);
     const newAccessToken = access_key(payload.userId);
 
-    // Continue request with new token
-    const res = NextResponse.next();
-    res.headers.set("x-user-id", payload.userId);
+    const headers = new Headers(req.headers);
+    headers.set("x-user-id", payload.userId);
+
+    const res = NextResponse.next({
+      request: { headers },
+    });
+
     res.cookies.set("accessToken", newAccessToken, {
       httpOnly: true,
-      secure: true,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       path: "/",
-      maxAge: 10 * 60, // 10 minutes
+      maxAge: 10 * 60,
     });
-    const user = res.headers.set("x-user-id", payload.userId);
-    console.log(user);
+
     return res;
-  } catch (err) {
-    // ❌ Refresh token invalid / expired
-    return NextResponse.json(
-      { message: "Unauthorized" },
-      { status: 401 }
-    );
+  } catch {
+    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 }
