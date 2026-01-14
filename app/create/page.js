@@ -1,7 +1,6 @@
 "use client"
 import { useState } from "react";
 export default function Home() {
-  const [room,setRoom] = useState(false);
   const [name,setName] = useState("");
   const [room_code,setRoom_code] = useState("");
   const createroom = async ()=>{
@@ -16,33 +15,18 @@ export default function Home() {
     setRoom(false);
     setRoom_code("");
   }
-  const joinroom = async()=>{
-
-  }
   return (
     <div>
       THis is the dashboard
       <button onClick={()=>setRoom(true)}> Create Room  </button>
-      {
-        room &&(
+      
           <div>
           <input type="text" placeholder="Name" onChange={(e)=>setName(e.target.value)}/>
           <input type="text" placeholder="Room Code" onChange={(e)=>setRoom_code(e.target.value)}/>
           <button onClick={createroom}>Submit</button>
           </div>
-        )
-      }
-      {
-        !room &&(
-          <div>
-            Join ROom
-            <input type="text" onChange={(e)=>{setRoom_code(e.target.value)}}/>
-            <button onClick={joinroom}> Join Room 
-
-            </button>
-          </div>
-        )
-      }
+        
+      
     </div>
   );
 }

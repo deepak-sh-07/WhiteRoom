@@ -39,119 +39,88 @@ export default function Login(){
     console.log(data.message);
   }
   
-  return(
-    <div className="fixed inset-0 w-full h-full bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 flex items-center justify-center p-6">
-      
-      {/* Card */}
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-8">
-        
-        {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">
-            {isLogin ? 'Welcome Back' : 'Create Account'}
-          </h1>
-          <p className="text-gray-600">
-            {isLogin ? 'Sign in to continue' : 'Sign up to get started'}
-          </p>
-        </div>
-        
-        {/* Forms */}
-        {isLogin ? (
-          <div className="space-y-5">
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
-              <input 
-                type="email" 
-                placeholder="Enter your email" 
-                onChange={(e)=>setEmail(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
-              <input 
-                type="password" 
-                placeholder="Enter your password" 
-                onChange={(e)=>setPassword(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-              />
-            </div>
-            
-            <button 
-              onClick={handlelogin}
-              className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-indigo-700 hover:to-purple-700 transition duration-200 mt-6"
-            >
-              Sign In
-            </button>
-            
-            <div className="text-center mt-6">
-              <p className="text-gray-600">
-                Don't have an account?{' '}
-                <button 
-                  onClick={()=>setIsLogin(false)}
-                  className="text-indigo-600 font-semibold hover:text-indigo-700"
-                >
-                  Sign up
-                </button>
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-5">
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
-              <input 
-                type="text" 
-                placeholder="Enter your name" 
-                onChange={(e)=>setName(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
-              <input 
-                type="email" 
-                placeholder="Enter your email" 
-                onChange={(e)=>setEmail(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
-              <input 
-                type="password" 
-                placeholder="Enter your password" 
-                onChange={(e)=>setPassword(e.target.value)}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition"
-              />
-            </div>
-            
-            <button 
-              onClick={handleregister}
-              className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-indigo-700 hover:to-purple-700 transition duration-200 mt-6"
-            >
-              Create Account
-            </button>
-            
-            <div className="text-center mt-6">
-              <p className="text-gray-600">
-                Already have an account?{' '}
-                <button 
-                  onClick={()=>setIsLogin(true)}
-                  className="text-indigo-600 font-semibold hover:text-indigo-700"
-                >
-                  Sign in
-                </button>
-              </p>
-            </div>
+ return (
+  <div className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-indigo-700 via-purple-700 to-pink-700 px-4">
+    
+    {/* Glass Card */}
+    <div className="relative w-full max-w-md rounded-3xl bg-white/90 backdrop-blur-xl shadow-2xl p-8">
+
+      {/* Glow */}
+      <div className="absolute -top-10 -right-10 w-40 h-40 bg-purple-400/30 rounded-full blur-3xl" />
+      <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-pink-400/30 rounded-full blur-3xl" />
+
+      {/* Header */}
+      <div className="relative text-center mb-8">
+        <h1 className="text-4xl font-extrabold text-gray-800 tracking-tight">
+          {isLogin ? "Welcome Back 👋" : "Create Account 🚀"}
+        </h1>
+        <p className="text-gray-600 mt-2">
+          {isLogin
+            ? "Login to continue to your dashboard"
+            : "Join us and start your journey"}
+        </p>
+      </div>
+
+      {/* Form */}
+      <div className="relative space-y-5">
+        {!isLogin && (
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-1">
+              Name
+            </label>
+            <input
+              type="text"
+              placeholder="John Doe"
+              onChange={(e) => setName(e.target.value)}
+              className="w-full rounded-xl border border-gray-300 px-4 py-3 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 outline-none transition"
+            />
           </div>
         )}
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-1">
+            Email
+          </label>
+          <input
+            type="email"
+            placeholder="you@example.com"
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded-xl border border-gray-300 px-4 py-3 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 outline-none transition"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-1">
+            Password
+          </label>
+          <input
+            type="password"
+            placeholder="••••••••"
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded-xl border border-gray-300 px-4 py-3 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 outline-none transition"
+          />
+        </div>
+
+        <button
+          onClick={isLogin ? handlelogin : handleregister}
+          className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 py-3 font-semibold text-white shadow-lg hover:from-indigo-700 hover:to-purple-700 hover:scale-[1.02] active:scale-[0.98] transition"
+        >
+          {isLogin ? "Sign In" : "Create Account"}
+        </button>
+
+        {/* Toggle */}
+        <p className="text-center text-sm text-gray-600 mt-6">
+          {isLogin ? "Don’t have an account?" : "Already have an account?"}{" "}
+          <button
+            onClick={() => setIsLogin(!isLogin)}
+            className="font-semibold text-indigo-600 hover:text-indigo-700 transition"
+          >
+            {isLogin ? "Sign up" : "Sign in"}
+          </button>
+        </p>
       </div>
     </div>
-  )
+  </div>
+);
+
 }
