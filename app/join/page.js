@@ -1,20 +1,37 @@
-"use client"
+"use client";
+
+import { useRouter } from "next/navigation";
 import { useState } from "react";
-export default function Home() {
-  const [room_code,setRoom_code] = useState("");
-    
-  const joinroom = async()=>{
 
-  }
+export default function JoinRoom() {
+  const [roomId, setRoomId] = useState("");
+  const router = useRouter();
+
+  const handleJoin = async() => {
+    if (!roomId.trim()) return;
+    const res = await fetch('http://localhost:3000/api/join',{
+      method:'POST',
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials:"include",
+        body: JSON.stringify({roomId}),
+    })
+    if(res.status==200) router.push(`/room/${roomId}`);
+    if(res.status==400) {
+      console.log("room doesnt exist");
+      return ;
+    }
+  };
+
   return (
-   
-          <div>
-            Join ROom
-            <input type="text" onChange={(e)=>{setRoom_code(e.target.value)}}/>
-            <button onClick={joinroom}> Join Room 
-
-            </button>
-          </div>
-        
-  )
+    <div>
+      <input
+        value={roomId}
+        onChange={(e) => setRoomId(e.target.value)}
+        placeholder="Enter room ID"
+      />
+      <button onClick={handleJoin}>Join</button>
+    </div>
+  );
 }
