@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { access_key } from "./jwt";
 
 export function auth(req) {
+  console.log("Auth working")
   const accessToken = req.cookies.get("accessToken")?.value;
   const refreshToken = req.cookies.get("refreshToken")?.value;
 
@@ -10,14 +11,19 @@ export function auth(req) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  // 1️ Access token
+  
+
+
+
+
+  
   if (accessToken) {
     try {
       const payload = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
 
       const headers = new Headers(req.headers);
       headers.set("x-user-id", payload.userId);
-
+      console.log("1" , payload.userId)
       return NextResponse.next({
         request: { headers },
       });
@@ -35,7 +41,7 @@ export function auth(req) {
 
     const headers = new Headers(req.headers);
     headers.set("x-user-id", payload.userId);
-
+    console.log("2" , payload.userId)
     const res = NextResponse.next({
       request: { headers },
     });
