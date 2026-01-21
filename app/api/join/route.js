@@ -1,18 +1,18 @@
-import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
-
 export async function POST(req) {
   try {
-    const { room_code } = await req.json();
+    const body = await req.json();
+    const code = body.roomId; 
 
-    if (!room_code) {
+    if (typeof code !== "string" || !code.trim()) {
       return NextResponse.json(
-        { message: "roomId is required" },
+        { message: "Valid room code is required" },
         { status: 400 }
       );
     }
 
-    // ✅ Only validate that the room exists
+    const room_code = code.trim();
+
     const room = await prisma.room.findUnique({
       where: { room_code },
     });
@@ -25,10 +25,7 @@ export async function POST(req) {
     }
 
     return NextResponse.json(
-      {
-        message: "Room exists. Join allowed.",
-        room_code,
-      },
+      { message: "Room exists. Join allowed.", room_code },
       { status: 200 }
     );
   } catch (err) {

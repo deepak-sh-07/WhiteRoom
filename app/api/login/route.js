@@ -31,6 +31,7 @@ export async function POST(req, res) {
   }
   const accessToken = access_key(user.id);
   const refreshToken = refresh_key(user.id);
+  
  cookieStore.set("accessToken", accessToken, {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",

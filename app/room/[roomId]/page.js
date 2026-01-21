@@ -1,14 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
+import { useParams } from "next/navigation";
 
-export default function Room({ params }) {
-  const { roomId } = params;
+export default  function Room() {
+  const { roomId } = useParams();
   const [connected, setConnected] = useState(false);
 
+  const pcRef = useRef(null);
+
   useEffect(() => {
-    // connect socket
+    // Create PC ONCE
+    pcRef.current = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+
+    const pc = pcRef.current;
+
+    // ICE handling
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit("ice-candidate", {
+          roomId,
+          candidate: event.candidate,
+        });
+      }
+    };
+
     socket.connect();
 
     socket.on("connect", () => {
@@ -16,22 +35,50 @@ export default function Room({ params }) {
       socket.emit("join-room", roomId);
     });
 
-    socket.on("disconnect", () => {
-      setConnected(false);
+    socket.on("offer", async ({ offer }) => {
+      await pc.setRemoteDescription(offer);
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      socket.emit("answer", { roomId, answer });
+    });
+
+    socket.on("answer", async ({ answer }) => {
+      await pc.setRemoteDescription(answer);
+    });
+
+    socket.on("ice-candidate", async ({ candidate }) => {
+      await pc.addIceCandidate(candidate);
     });
 
     return () => {
-      socket.emit("leave-room", roomId);
       socket.off("connect");
-      socket.off("disconnect");
+      socket.off("offer");
+      socket.off("answer");
+      socket.off("ice-candidate");
+
       socket.disconnect();
+      pc.close();
     };
   }, [roomId]);
+
+  // Call this ONLY for host
+  const sendOffer = async () => {
+    const pc = pcRef.current;
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket.emit("offer", { roomId, offer });
+  };
 
   return (
     <div>
       <h1>Room: {roomId}</h1>
       <p>Status: {connected ? "Connected" : "Disconnected"}</p>
+
+      <button onClick={sendOffer}>Start Connection</button>
     </div>
   );
 }

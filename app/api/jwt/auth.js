@@ -12,11 +12,6 @@ export function auth(req) {
   }
 
   
-
-
-
-
-  
   if (accessToken) {
     try {
       const payload = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
