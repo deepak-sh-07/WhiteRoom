@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
 import { useParams } from "next/navigation";
 
-export default  function Room() {
+export default function Room() {
   const { roomId } = useParams();
   const [connected, setConnected] = useState(false);
 
@@ -19,7 +19,7 @@ export default  function Room() {
     const pc = pcRef.current;
 
     // ICE handling
-    pc.onicecandidate = (event) => {
+    pc.onicecandidate = (event) => {  //to get own ip then sent to every one 
       if (event.candidate) {
         socket.emit("ice-candidate", {
           roomId,
