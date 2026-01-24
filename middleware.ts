@@ -8,5 +8,6 @@ export const config = {
   matcher: [
     "/api/rooms/:path*",
     "/api/join/:path*",
+    "/api/me/:path*",
   ],
 };

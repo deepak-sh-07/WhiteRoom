@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
-export default function GET(req){
-    const userId = (req.headers.get("x-user-id"));
-    if(!userId) return NextResponse.json({status:404,message:"User not found"});
-    return NextResponse.json({status:200,message:"Fine"});
+
+export function GET(req) {
+  const userId = req.headers.get("x-user-id");
+
+  if (!userId) {
+    return NextResponse.json(
+      { message: "User not found" },
+      { status: 404 }
+    );
+  }
+
+  return NextResponse.json(
+    { message: "Fine", userId },
+    { status: 200 }
+  );
 }
