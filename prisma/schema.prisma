@@ -35,8 +35,26 @@ model RoomUser {
   id        Int   @id @default(autoincrement())
   userId    Int
   roomId    Int
+
+  role      RoomRole   @default(PEER)
+  status    RoomStatus @default(PENDING)
+
   user      User @relation(fields: [userId], references: [id])
   room      Room @relation(fields: [roomId], references: [id])
 
   @@unique([userId, roomId])
 }
+
+enum RoomRole {
+  HOST
+  PEER
+}
+
+enum RoomStatus {
+  PENDING
+  APPROVED
+  JOINED
+  LEFT
+  KICKED
+}
+

@@ -51,6 +51,15 @@ export default function Room() {
       console.log("💬 Peer:", e.data);
     };
   };
+  async function getIceServers() {
+  try {
+    const res = await fetch("/api/turn");
+    if (!res.ok) throw new Error();
+    return await res.json();
+  } catch {
+    return [{ urls: "stun:stun.l.google.com:19302" }];
+  }
+}
 
 
   useEffect(() => {
@@ -68,36 +77,46 @@ export default function Room() {
     };
   }, []);
 
-
+  
   /* ---------------- SETUP ---------------- */
   useEffect(() => {
+  let active = true;
+
+  (async () => {
     if (!roomId) return;
+    
+    const iceServers  = await getIceServers();
+    if (!active) return;
 
     pcRef.current = new RTCPeerConnection({ // basic webrtc connection 
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
+      iceServers  //: [{ urls: "stun:stun.l.google.com:19302" }], //stud servers finds out the public ip of the machine and provides to ice candidate
+    });                                                       //NAT = Network Address Translation. It’s a technique used by routers to let many private devices share one public IP address.
+
+    // we are using stun and turn servers because the stun only provides public ip but that doesnt guarentee connection
+    // after stun fails turn take over and guarentees all traffic to be relayed through it 
+
 
     const pc = pcRef.current;
 
     pc.ontrack = (e) => {
-  console.log("ontrack fired", e.track.kind);
+      console.log("ontrack fired", e.track.kind);
 
-  let stream = remoteVideoRef.current.srcObject;
+      let stream = remoteVideoRef.current.srcObject;
 
-  if (!stream) {
-    stream = new MediaStream();
-    remoteVideoRef.current.srcObject = stream;
-  }
+      if (!stream) {
+        stream = new MediaStream();
+        remoteVideoRef.current.srcObject = stream;
+      }
 
-  stream.addTrack(e.track);
+      stream.addTrack(e.track);
 
-  // 🔑 explicitly request playback
-  remoteVideoRef.current
-    .play()
-    .catch(() => {
-      console.log("Autoplay blocked until user gesture");
-    });
-};
+      // 🔑 explicitly request playback
+      remoteVideoRef.current
+        .play()
+        .catch(() => {
+          console.log("Autoplay blocked until user gesture");
+        });
+    };
 
 
     pc.onicecandidate = (e) => { // ice-candidates send our info like ip router etc to others throught socket 
@@ -106,8 +125,11 @@ export default function Room() {
           roomId,
           candidate: e.candidate,
         });
+
+        console.log(e.candidate.candidate);
       }
     };
+
 
     pc.ondatachannel = (e) => {
       const channel = e.channel;
@@ -203,7 +225,13 @@ export default function Room() {
         remoteVideoRef.current.srcObject = null;
       }
     };
-  }, [roomId]);
+  })();
+
+  return () => {
+    active = false;
+  };
+}, [roomId]);
+
 
 
   return (

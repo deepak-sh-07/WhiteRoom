@@ -3,7 +3,7 @@ import prisma from "@/lib/prisma";
 
 export async function POST(req) {
   const userId = Number(req.headers.get("x-user-id"));
-  console.log(userId);
+
   if (!userId) {
     return NextResponse.json(
       { message: "Unauthorized" },
@@ -24,18 +24,31 @@ export async function POST(req) {
     );
   }
 
-  const createRoom = await prisma.room.create({
-    data: {
-      name,
-      room_code,
-      createdById: userId,
-    },
+  const room = await prisma.$transaction(async (tx) => {// this trasactions is a prisma function and all the queries inside this function are treated as one if one of them fails all is failed 
+    const createdRoom = await tx.room.create({
+      data: {
+        name,
+        room_code,
+        createdById: userId,
+      },
+    });
+
+    await tx.roomUser.create({
+      data: {
+        userId,
+        roomId: createdRoom.id,
+        role: "HOST",
+        status: "APPROVED",
+      },
+    });
+
+    return createdRoom;
   });
 
   return NextResponse.json(
     {
       message: "Room created",
-      room: createRoom,
+      room,
     },
     { status: 201 }
   );
