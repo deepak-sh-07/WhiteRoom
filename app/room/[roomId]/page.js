@@ -9,11 +9,13 @@ export default function Room() {
   const [connected, setConnected] = useState(false);
   const [role, setRole] = useState(null);
   const [msg, setMsg] = useState("");
+  const [users, setUsers] = useState([]);
+  const [messages, setMessages] = useState([]);
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const pendingIce = useRef([]);
   const dataChannelRef = useRef(null);
-  const roleRef = useRef(null)
+  const roleRef = useRef(null);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerReadyRef = useRef(false);
@@ -44,22 +46,56 @@ export default function Room() {
 
     channel.onopen = () => {
       console.log("✅ DataChannel open (host)");
-      channel.send("Hello from host");
+      sendMessage("chat", {
+        text: "Hello from host",
+        sender: "host",
+      });
     };
 
-    channel.onmessage = (e) => {
-      console.log("💬 Peer:", e.data);
-    };
+    channel.onmessage = (e) => handleMessage(e.data);
+
   };
-  async function getIceServers() {
-  try {
-    const res = await fetch("/api/turn");
-    if (!res.ok) throw new Error();
-    return await res.json();
-  } catch {
-    return [{ urls: "stun:stun.l.google.com:19302" }];
+  function sendMessage(type, payload) {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== "open") return;
+
+    channel.send(JSON.stringify({
+      type,
+      payload,
+      ts: Date.now()
+    }));
   }
-}
+  function handleMessage(raw) {
+    const msg = JSON.parse(raw);
+
+    switch (msg.type) {
+      case "chat":
+        setMessages((prev) => [...prev, msg]);
+        break;
+
+      case "presence":
+        setUsers((u) => {
+          if (u.find(x => x.userId === msg.payload.userId)) return u;
+          return [...u, msg.payload];
+        });
+        break;
+
+
+      case "control":
+        console.log(" Control event:", msg.payload);
+        break;
+    }
+  }
+
+  async function getIceServers() {
+    try {
+      const res = await fetch("/api/turn");
+      if (!res.ok) throw new Error();
+      return await res.json();
+    } catch {
+      return [{ urls: "stun:stun.l.google.com:19302" }];
+    }
+  }
 
 
   useEffect(() => {
@@ -77,160 +113,166 @@ export default function Room() {
     };
   }, []);
 
-  
+
   /* ---------------- SETUP ---------------- */
   useEffect(() => {
-  let active = true;
+    let active = true;
 
-  (async () => {
-    if (!roomId) return;
-    
-    const iceServers  = await getIceServers();
-    if (!active) return;
+    (async () => {
+      if (!roomId) return;
 
-    pcRef.current = new RTCPeerConnection({ // basic webrtc connection 
-      iceServers  //: [{ urls: "stun:stun.l.google.com:19302" }], //stud servers finds out the public ip of the machine and provides to ice candidate
-    });                                                       //NAT = Network Address Translation. It’s a technique used by routers to let many private devices share one public IP address.
+      const iceServers = await getIceServers();
+      if (!active) return;
 
-    // we are using stun and turn servers because the stun only provides public ip but that doesnt guarentee connection
-    // after stun fails turn take over and guarentees all traffic to be relayed through it 
+      pcRef.current = new RTCPeerConnection({ // basic webrtc connection 
+        iceServers  //: [{ urls: "stun:stun.l.google.com:19302" }], //stud servers finds out the public ip of the machine and provides to ice candidate
+      });                                                       //NAT = Network Address Translation. It’s a technique used by routers to let many private devices share one public IP address.
 
-
-    const pc = pcRef.current;
-
-    pc.ontrack = (e) => {
-      console.log("ontrack fired", e.track.kind);
-
-      let stream = remoteVideoRef.current.srcObject;
-
-      if (!stream) {
-        stream = new MediaStream();
-        remoteVideoRef.current.srcObject = stream;
-      }
-
-      stream.addTrack(e.track);
-
-      // 🔑 explicitly request playback
-      remoteVideoRef.current
-        .play()
-        .catch(() => {
-          console.log("Autoplay blocked until user gesture");
-        });
-    };
+      // we are using stun and turn servers because the stun only provides public ip but that doesnt guarentee connection
+      // after stun fails turn take over and guarentees all traffic to be relayed through it 
 
 
-    pc.onicecandidate = (e) => { // ice-candidates send our info like ip router etc to others throught socket 
-      if (e.candidate) {
-        socket.emit("ice-candidate", {
-          roomId,
-          candidate: e.candidate,
-        });
+      const pc = pcRef.current;
 
-        console.log(e.candidate.candidate);
-      }
-    };
+      pc.ontrack = (e) => {
+        console.log("ontrack fired", e.track.kind);
 
+        let stream = remoteVideoRef.current.srcObject;
 
-    pc.ondatachannel = (e) => {
-      const channel = e.channel;
-      dataChannelRef.current = channel;
+        if (!stream) {
+          stream = new MediaStream();
+          remoteVideoRef.current.srcObject = stream;
+        }
 
-      channel.onopen = () => {
-        console.log("✅ DataChannel open (peer)");
+        stream.addTrack(e.track);
+
+        // 🔑 explicitly request playback
+        remoteVideoRef.current
+          .play()
+          .catch(() => {
+            console.log("Autoplay blocked until user gesture");
+          });
       };
 
-      channel.onmessage = (e) => {
-        console.log("💬 Host:", e.data);
-        channel.send("Hello back from peer");
-        // channel.send(msg);
+
+      pc.onicecandidate = (e) => { // ice-candidates send our info like ip router etc to others throught socket 
+        if (e.candidate) {
+          socket.emit("ice-candidate", {
+            roomId,
+            candidate: e.candidate,
+          });
+
+          console.log(e.candidate.candidate);
+        }
       };
-    };
 
-    if (!socket.connected) socket.connect();
 
-    const onConnect = () => {
-      setConnected(true);
-      socket.emit("join-room", roomId);
-    };
+      pc.ondatachannel = (e) => { // data channel will listen to the upcoming msg and call handle message
+        const channel = e.channel;
+        dataChannelRef.current = channel;
 
-    const onPeerReady = async () => {
-      peerReadyRef.current = true;
-      if (roleRef.current !== "host") return;
-      if (!pcRef.current) return;
+        channel.onopen = () => {
+          console.log("✅ DataChannel open (peer)");
+          sendMessage("presence", { userId, role: "peer" });
+        };
 
-      await startMedia();              //these two are called before offer because webrtc state should have everything before making an offer 
-      createDataChannel();             // everything means info about stream and tracks 
-      await Promise.resolve();
-      console.log(
-        "Senders before offer:",
-        pcRef.current.getSenders().map(s => s.track?.kind)
-      );
-      const offer = await pcRef.current.createOffer();
-      await pcRef.current.setLocalDescription(offer);
+        channel.onmessage = (e) => handleMessage(e.data); // this listens to the message 
 
-      socket.emit("offer", { roomId, offer });
-    };
 
-    const onOffer = async ({ offer }) => {
-      await pc.setRemoteDescription(offer);  //tells it what the other peer wants.
+        channel.onclose = () => {
+          console.warn("❌ DataChannel closed");
+        };
 
-      pendingIce.current.forEach((c) => pc.addIceCandidate(c));
-      pendingIce.current = [];
+        channel.onerror = (e) => {
+          console.error("⚠️ DataChannel error", e);
+        };
+      };
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer); //tells the browser what you want the WebRTC session to look like, and
+      if (!socket.connected) socket.connect();
 
-      socket.emit("answer", { roomId, answer });
-    };
+      const onConnect = () => {
+        setConnected(true);
+        socket.emit("join-room", roomId);
+      };
 
-    const onAnswer = async ({ answer }) => {
-      await pc.setRemoteDescription(answer);
+      const onPeerReady = async () => {
+        peerReadyRef.current = true;
+        if (roleRef.current !== "host") return;
+        if (!pcRef.current) return;
 
-      pendingIce.current.forEach((c) => pc.addIceCandidate(c));
-      pendingIce.current = [];
-    };
+        await startMedia();              //these two are called before offer because webrtc state should have everything before making an offer 
+        createDataChannel();             // everything means info about stream and tracks 
+        await Promise.resolve();
+        console.log(
+          "Senders before offer:",
+          pcRef.current.getSenders().map(s => s.track?.kind)
+        );
+        const offer = await pcRef.current.createOffer();
+        await pcRef.current.setLocalDescription(offer);
 
-    const onIceCandidate = async ({ candidate }) => { // this save the incoming ice-candidate to rtc connection so browser can check which route should be taken (happens internally) 
-      if (pc.remoteDescription) {
-        await pc.addIceCandidate(candidate);
-      } else {
-        pendingIce.current.push(candidate);
-      }
-    };
+        socket.emit("offer", { roomId, offer });
+      };
 
-    socket.on("connect", onConnect);
-    socket.on("peer-ready", onPeerReady);
-    socket.on("offer", onOffer);
-    socket.on("answer", onAnswer);
-    socket.on("ice-candidate", onIceCandidate);
+      const onOffer = async ({ offer }) => {
+        await pc.setRemoteDescription(offer);  //tells it what the other peer wants.
+
+        pendingIce.current.forEach((c) => pc.addIceCandidate(c));
+        pendingIce.current = [];
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer); //tells the browser what you want the WebRTC session to look like, and
+
+        socket.emit("answer", { roomId, answer });
+      };
+
+      const onAnswer = async ({ answer }) => {
+        await pc.setRemoteDescription(answer);
+
+        pendingIce.current.forEach((c) => pc.addIceCandidate(c));
+        pendingIce.current = [];
+      };
+
+      const onIceCandidate = async ({ candidate }) => { // this save the incoming ice-candidate to rtc connection so browser can check which route should be taken (happens internally) 
+        if (pc.remoteDescription) {
+          await pc.addIceCandidate(candidate);
+        } else {
+          pendingIce.current.push(candidate);
+        }
+      };
+
+      socket.on("connect", onConnect);
+      socket.on("peer-ready", onPeerReady);
+      socket.on("offer", onOffer);
+      socket.on("answer", onAnswer);
+      socket.on("ice-candidate", onIceCandidate);
+
+      return () => {
+        socket.off("connect", onConnect);
+        socket.off("peer-ready", onPeerReady);
+        socket.off("offer", onOffer);
+        socket.off("answer", onAnswer);
+        socket.off("ice-candidate", onIceCandidate);
+
+        roleRef.current = null;
+        peerReadyRef.current = false;
+
+        pc.close();
+
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((t) => t.stop());
+          localStreamRef.current = null;
+        }
+
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = null;
+        }
+      };
+    })();
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("peer-ready", onPeerReady);
-      socket.off("offer", onOffer);
-      socket.off("answer", onAnswer);
-      socket.off("ice-candidate", onIceCandidate);
-
-      roleRef.current = null;
-      peerReadyRef.current = false;
-
-      pc.close();
-
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
-
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = null;
-      }
+      active = false;
     };
-  })();
-
-  return () => {
-    active = false;
-  };
-}, [roomId]);
+  }, [roomId]);
 
 
 
@@ -239,17 +281,42 @@ export default function Room() {
       <h2>Room: {roomId}</h2>
       <p>Status: {connected ? "Connected" : "Disconnected"}</p>
       <p>Role: {role}</p>
-      <input type="text" onChange={(e) => setMsg(e.target.value)} />
+      <input
+        value={msg}
+        onChange={(e) => setMsg(e.target.value)}
+        placeholder="Type message"
+      />
+      <button onClick={() => {
+  sendMessage("chat", {
+    text: msg,
+    sender: roleRef.current ?? "unknown",
+  });
+  setMsg("");
+}}>
+
+        Send
+      </button>
       <div style={{ display: "flex", gap: 10 }}>
         <video ref={localVideoRef} autoPlay muted playsInline width={300} />
         <video
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          muted   // 🔑 required for autoplay
+          muted   //  required for autoplay
           width={300}
         />
       </div>
+      <div key={i}>
+  <b>{m.payload.sender}</b>
+  {" "}
+  <small>{new Date(m.ts).toLocaleTimeString()}</small>
+  : {m.payload.text}
+</div>
+
+      <div>
+        Active users: {users.map(u => u.role).join(", ")}
+      </div>
+
     </div>
   );
 }
