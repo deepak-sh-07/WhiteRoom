@@ -1,5 +1,11 @@
 "use client";
-
+import {
+  generateRoomKey,
+  exportKey,
+  importKey,
+  encrypt,
+  decrypt,
+} from "@/lib/crypto";
 import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
 import { useParams } from "next/navigation";
@@ -9,6 +15,7 @@ export default function Room() {
   const [connected, setConnected] = useState(false);
   const [role, setRole] = useState(null);
   const [msg, setMsg] = useState("");
+  const roomKeyRef = useRef(null);
   const [users, setUsers] = useState([]);
   const [messages, setMessages] = useState([]);
   const pcRef = useRef(null);
@@ -44,17 +51,32 @@ export default function Room() {
     const channel = pcRef.current.createDataChannel("chat");
     dataChannelRef.current = channel;
 
-    channel.onopen = () => {
+    channel.onopen = async () => {
       console.log("✅ DataChannel open (host)");
-      sendMessage("chat", {
-        text: "Hello from host",
-        sender: "host",
+
+      roomKeyRef.current = await generateRoomKey();
+      const exported = await exportKey(roomKeyRef.current);
+
+      sendMessage("control", {
+        action: "SET_KEY",
+        key: exported,
       });
     };
 
     channel.onmessage = (e) => handleMessage(e.data);
 
   };
+  async function sendEncryptedChat(text) {
+    if (!roomKeyRef.current) return;
+
+    const encryptedPayload = await encrypt(roomKeyRef.current, {
+      text,
+      sender: roleRef.current ?? "unknown",
+    });
+
+    sendMessage("chat", encryptedPayload);
+  }
+
   function sendMessage(type, payload) {
     const channel = dataChannelRef.current;
     if (!channel || channel.readyState !== "open") return;
@@ -65,13 +87,29 @@ export default function Room() {
       ts: Date.now()
     }));
   }
-  function handleMessage(raw) {
+  async function handleMessage(raw) {
     const msg = JSON.parse(raw);
 
     switch (msg.type) {
-      case "chat":
-        setMessages((prev) => [...prev, msg]);
+      case "chat": {
+        if (!roomKeyRef.current) {
+          console.warn("Chat received before key, dropping message");
+          return;
+        }
+
+
+        const decrypted = await decrypt(roomKeyRef.current, msg.payload);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            ...msg,
+            payload: decrypted,
+          },
+        ]);
         break;
+      }
+
 
       case "presence":
         setUsers((u) => {
@@ -82,8 +120,12 @@ export default function Room() {
 
 
       case "control":
-        console.log(" Control event:", msg.payload);
+        if (msg.payload.action === "SET_KEY") {
+          roomKeyRef.current = await importKey(msg.payload.key);
+          console.log("🔐 Room key received");
+        }
         break;
+
     }
   }
 
@@ -173,7 +215,7 @@ export default function Room() {
 
         channel.onopen = () => {
           console.log("✅ DataChannel open (peer)");
-          sendMessage("presence", { userId, role: "peer" });
+          sendMessage("presence", {  role: "peer" });
         };
 
         channel.onmessage = (e) => handleMessage(e.data); // this listens to the message 
@@ -287,15 +329,12 @@ export default function Room() {
         placeholder="Type message"
       />
       <button onClick={() => {
-  sendMessage("chat", {
-    text: msg,
-    sender: roleRef.current ?? "unknown",
-  });
-  setMsg("");
-}}>
-
+        sendEncryptedChat(msg);
+        setMsg("");
+      }}>
         Send
       </button>
+
       <div style={{ display: "flex", gap: 10 }}>
         <video ref={localVideoRef} autoPlay muted playsInline width={300} />
         <video
@@ -306,12 +345,16 @@ export default function Room() {
           width={300}
         />
       </div>
-      <div key={i}>
-  <b>{m.payload.sender}</b>
-  {" "}
-  <small>{new Date(m.ts).toLocaleTimeString()}</small>
-  : {m.payload.text}
-</div>
+      <div>
+        {messages.map((m, i) => (
+          <div key={i}>
+            <b>{m.payload.sender}</b>{" "}
+            <small>{new Date(m.ts).toLocaleTimeString()}</small>
+            : {m.payload.text}
+          </div>
+        ))}
+      </div>
+
 
       <div>
         Active users: {users.map(u => u.role).join(", ")}
