@@ -197,6 +197,7 @@ export default function Room() {
       };
 
 
+      /////////
       pc.onicecandidate = (e) => { // ice-candidates send our info like ip router etc to others throught socket 
         if (e.candidate) {
           socket.emit("ice-candidate", {
