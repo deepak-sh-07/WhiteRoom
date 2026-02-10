@@ -5,6 +5,11 @@ import {
   importKey,
   encrypt,
   decrypt,
+  generateRSAKeyPair,
+  exportPublicKey,
+  importPublicKey,
+  encryptWithPublicKey,
+  decryptWithPrivateKey
 } from "@/lib/crypto";
 import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
@@ -24,6 +29,8 @@ export default function Room() {
   const dataChannelRef = useRef(null);
   const roleRef = useRef(null);
   const localVideoRef = useRef(null);
+  const rsaKeyPairRef = useRef(null);
+  const peerPublicKeyRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerReadyRef = useRef(false);
 
@@ -54,14 +61,25 @@ export default function Room() {
     channel.onopen = async () => {
       console.log("✅ DataChannel open (host)");
 
+      // 🔑 1️⃣ Generate AES room key FIRST
       roomKeyRef.current = await generateRoomKey();
-      const exported = await exportKey(roomKeyRef.current);
+
+      // 🔐 2️⃣ Generate RSA keys
+      rsaKeyPairRef.current = await generateRSAKeyPair();
+
+      // 📤 3️⃣ Send RSA public key
+      const publicKey = await exportPublicKey(
+        rsaKeyPairRef.current.publicKey
+      );
 
       sendMessage("control", {
-        action: "SET_KEY",
-        key: exported,
+        action: "PUBLIC_KEY",
+        key: publicKey,
       });
     };
+
+
+
 
     channel.onmessage = (e) => handleMessage(e.data);
 
@@ -96,20 +114,21 @@ export default function Room() {
           console.warn("Chat received before key, dropping message");
           return;
         }
+        try {
+          const decrypted = await decrypt(roomKeyRef.current, msg.payload);
 
+          const chatMessage = {
+            sender: decrypted.sender,
+            text: decrypted.text,
+            timestamp: msg.ts,
+          };
 
-        const decrypted = await decrypt(roomKeyRef.current, msg.payload);
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            ...msg,
-            payload: decrypted,
-          },
-        ]);
+          setMessages(prev => [...prev, chatMessage]);
+        } catch {
+          // silently drop invalid / corrupted / foreign messages
+        }
         break;
       }
-
 
       case "presence":
         setUsers((u) => {
@@ -120,11 +139,41 @@ export default function Room() {
 
 
       case "control":
-        if (msg.payload.action === "SET_KEY") {
-          roomKeyRef.current = await importKey(msg.payload.key);
-          console.log("🔐 Room key received");
+
+        // 1️⃣ Receive peer public key
+        if (msg.payload.action === "PUBLIC_KEY") {
+          peerPublicKeyRef.current = await importPublicKey(msg.payload.key);
+          console.log("🔑 Peer public key received");
+
+          // Host encrypts AES key and sends it
+          if (roleRef.current === "host") {
+            const rawAESKey = await exportKey(roomKeyRef.current);
+
+            const encryptedKey = await encryptWithPublicKey(
+              peerPublicKeyRef.current,
+              rawAESKey
+            );
+
+            sendMessage("control", {
+              action: "SET_KEY_SECURE",
+              key: encryptedKey,
+            });
+          }
         }
+
+        // 2️⃣ Receive encrypted AES key
+        if (msg.payload.action === "SET_KEY_SECURE") {
+          const rawAESKey = await decryptWithPrivateKey(
+            rsaKeyPairRef.current.privateKey,
+            msg.payload.key
+          );
+
+          roomKeyRef.current = await importKey(rawAESKey);
+          console.log("🔐 Secure room key established");
+        }
+
         break;
+
 
     }
   }
@@ -214,10 +263,23 @@ export default function Room() {
         const channel = e.channel;
         dataChannelRef.current = channel;
 
-        channel.onopen = () => {
+        channel.onopen = async () => {
           console.log("✅ DataChannel open (peer)");
-          sendMessage("presence", {  role: "peer" });
+
+          rsaKeyPairRef.current = await generateRSAKeyPair();
+
+          const publicKey = await exportPublicKey(
+            rsaKeyPairRef.current.publicKey
+          );
+
+          sendMessage("control", {
+            action: "PUBLIC_KEY",
+            key: publicKey,
+          });
+
+          sendMessage("presence", { role: "peer" });
         };
+
 
         channel.onmessage = (e) => handleMessage(e.data); // this listens to the message 
 
