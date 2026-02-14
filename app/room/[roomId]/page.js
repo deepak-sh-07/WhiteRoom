@@ -14,7 +14,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
 import { useParams } from "next/navigation";
-
+import { Send, Users, Wifi, WifiOff, Shield, Lock, MessageSquare, X, Minimize2, Video, Mic, MicOff, VideoOff, PhoneOff } from 'lucide-react';
 export default function Room() {
   const { roomId } = useParams();
   const [connected, setConnected] = useState(false);
@@ -34,6 +34,10 @@ export default function Room() {
   const remoteVideoRef = useRef(null);
   const peerReadyRef = useRef(false);
 
+  const [isChatOpen, setIsChatOpen] = useState(true);
+  const [isChatMinimized, setIsChatMinimized] = useState(false);
+  const [isMicOn, setIsMicOn] = useState(true);
+  const [isCameraOn, setIsCameraOn] = useState(true);
 
   /* ---------------- MEDIA ---------------- */
   const startMedia = async () => { //it prepares media to be sent by attaching tracks to the RTCPeerConnection.
@@ -216,7 +220,7 @@ export default function Room() {
       if (!active) return;
 
       pcRef.current = new RTCPeerConnection({ // basic webrtc connection 
-        iceServers  //: [{ urls: "stun:stun.l.google.com:19302" }], //stud servers finds out the public ip of the machine and provides to ice candidate
+        iceServers  //stun servers finds out the public ip of the machine and provides to ice candidate
       });                                                       //NAT = Network Address Translation. It’s a technique used by routers to let many private devices share one public IP address.
 
       // we are using stun and turn servers because the stun only provides public ip but that doesnt guarentee connection
@@ -246,7 +250,6 @@ export default function Room() {
       };
 
 
-      /////////
       pc.onicecandidate = (e) => { // ice-candidates send our info like ip router etc to others throught socket 
         if (e.candidate) {
           socket.emit("ice-candidate", {
@@ -306,7 +309,7 @@ export default function Room() {
         if (!pcRef.current) return;
 
         await startMedia();              //these two are called before offer because webrtc state should have everything before making an offer 
-        createDataChannel();             // everything means info about stream and tracks 
+        createDataChannel();             // everything means info about stream and tracks
         await Promise.resolve();
         console.log(
           "Senders before offer:",
@@ -378,51 +381,275 @@ export default function Room() {
       active = false;
     };
   }, [roomId]);
+  const handleSend = () => {
+    sendEncryptedChat(msg);
+    setMsg('');
+  };
 
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
 
 
   return (
-    <div>
-      <h2>Room: {roomId}</h2>
-      <p>Status: {connected ? "Connected" : "Disconnected"}</p>
-      <p>Role: {role}</p>
-      <input
-        value={msg}
-        onChange={(e) => setMsg(e.target.value)}
-        placeholder="Type message"
-      />
-      <button onClick={() => {
-        sendEncryptedChat(msg);
-        setMsg("");
-      }}>
-        Send
-      </button>
+    <div className="min-h-screen bg-gradient-to-br from-cyan-400 via-pink-400 to-yellow-400 p-4">
+      <div className="w-full h-[95vh] flex flex-col">
 
-      <div style={{ display: "flex", gap: 10 }}>
-        <video ref={localVideoRef} autoPlay muted playsInline width={300} />
-        <video
-          ref={remoteVideoRef}
-          autoPlay
-          playsInline
-          muted   //  required for autoplay
-          width={300}
-        />
-      </div>
-      <div>
-        {messages.map((m, i) => (
-          <div key={i}>
-            <b>{m.payload.sender}</b>{" "}
-            <small>{new Date(m.ts).toLocaleTimeString()}</small>
-            : {m.payload.text}
+        {/* Header */}
+        <div className="bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500 p-4 rounded-t-2xl border-2 border-white/30 shadow-2xl">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white/20 rounded-xl backdrop-blur-sm border border-white/30">
+                <Lock className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-white drop-shadow-lg">Encrypted Video Room</h1>
+                <p className="text-white/90 text-xs font-medium">Room: {roomId}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border-2 ${connected
+                  ? 'bg-green-400/30 border-green-300 shadow-lg shadow-green-400/20'
+                  : 'bg-red-400/30 border-red-300 shadow-lg shadow-red-400/20'
+                }`}>
+                {connected ? (
+                  <>
+                    <Wifi className="w-4 h-4 text-white drop-shadow" />
+                    <span className="text-white text-sm font-bold drop-shadow">Connected</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-4 h-4 text-white drop-shadow" />
+                    <span className="text-white text-sm font-bold drop-shadow">Disconnected</span>
+                  </>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-yellow-400/30 rounded-lg border-2 border-yellow-300 shadow-lg shadow-yellow-400/20">
+                <Shield className="w-4 h-4 text-white drop-shadow" />
+                <span className="text-white text-sm font-bold drop-shadow">{role}</span>
+              </div>
+
+              <button
+                onClick={() => {
+                  setIsChatOpen(!isChatOpen);
+                  setIsChatMinimized(false);
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 rounded-lg border-2 border-white/30 transition-all shadow-lg"
+              >
+                <MessageSquare className="w-4 h-4 text-white drop-shadow" />
+                <span className="text-white text-sm font-bold drop-shadow">
+                  {isChatOpen ? 'Hide Chat' : 'Show Chat'}
+                </span>
+              </button>
+            </div>
           </div>
-        ))}
+        </div>
+
+        {/* Main Content Area - Video Grid */}
+        <div className="flex-1 bg-gradient-to-br from-purple-400/20 via-pink-400/20 to-cyan-400/20 backdrop-blur-xl border-x-2 border-white/30 p-6 overflow-hidden">
+          <div className="w-full h-full grid grid-cols-2 gap-6">
+
+            {/* Local Video */}
+            <div className="relative bg-gradient-to-br from-pink-300 to-purple-300 rounded-3xl border-4 border-white/50 shadow-2xl overflow-hidden">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute bottom-4 left-4 bg-black/40 backdrop-blur-md px-4 py-2 rounded-full border-2 border-white/30">
+                <span className="text-white font-bold text-sm drop-shadow">You ({role})</span>
+              </div>
+              <div className="absolute top-4 right-4 flex gap-2">
+                <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse border-2 border-white shadow-lg"></div>
+              </div>
+            </div>
+
+            {/* Remote Video */}
+            <div className="relative bg-gradient-to-br from-cyan-300 to-blue-300 rounded-3xl border-4 border-white/50 shadow-2xl overflow-hidden">
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute bottom-4 left-4 bg-black/40 backdrop-blur-md px-4 py-2 rounded-full border-2 border-white/30">
+                <span className="text-white font-bold text-sm drop-shadow">Remote User</span>
+              </div>
+              <div className="absolute top-4 right-4 flex gap-2">
+                <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse border-2 border-white shadow-lg"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer Controls */}
+        <div className="bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500 p-4 rounded-b-2xl border-2 border-t-0 border-white/30 shadow-2xl">
+          <div className="flex items-center justify-center gap-4">
+            <button
+              onClick={() => setIsMicOn(!isMicOn)}
+              className={`p-4 rounded-2xl border-2 transition-all shadow-lg ${isMicOn
+                  ? 'bg-white/20 border-white/40 hover:bg-white/30'
+                  : 'bg-red-500 border-red-400 hover:bg-red-600'
+                }`}
+            >
+              {isMicOn ? (
+                <Mic className="w-6 h-6 text-white drop-shadow" />
+              ) : (
+                <MicOff className="w-6 h-6 text-white drop-shadow" />
+              )}
+            </button>
+
+            <button
+              onClick={() => setIsCameraOn(!isCameraOn)}
+              className={`p-4 rounded-2xl border-2 transition-all shadow-lg ${isCameraOn
+                  ? 'bg-white/20 border-white/40 hover:bg-white/30'
+                  : 'bg-red-500 border-red-400 hover:bg-red-600'
+                }`}
+            >
+              {isCameraOn ? (
+                <Video className="w-6 h-6 text-white drop-shadow" />
+              ) : (
+                <VideoOff className="w-6 h-6 text-white drop-shadow" />
+              )}
+            </button>
+
+            <button className="p-4 bg-red-500 hover:bg-red-600 rounded-2xl border-2 border-red-400 transition-all shadow-lg hover:shadow-red-500/50">
+              <PhoneOff className="w-6 h-6 text-white drop-shadow" />
+            </button>
+          </div>
+        </div>
       </div>
 
+      {/* Floating Chat Panel */}
+      {isChatOpen && (
+        <div className="fixed bottom-4 right-4 z-50 transition-all duration-300">
+          {isChatMinimized ? (
+            <button
+              onClick={() => setIsChatMinimized(false)}
+              className="relative bg-gradient-to-r from-pink-500 to-purple-500 p-4 rounded-2xl shadow-2xl border-2 border-white/50 hover:scale-105 transition-transform"
+            >
+              <MessageSquare className="w-6 h-6 text-white" />
+              {messages.length > 0 && (
+                <span className="absolute -top-2 -right-2 bg-yellow-400 text-purple-900 text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-lg">
+                  {messages.length}
+                </span>
+              )}
+            </button>
+          ) : (
+            <div className="w-96 h-[600px] bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border-4 border-pink-300 flex flex-col overflow-hidden">
 
-      <div>
-        Active users: {users.map(u => u.role).join(", ")}
-      </div>
+              {/* Chat Header */}
+              <div className="bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500 p-4 border-b-2 border-white/30 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <MessageSquare className="w-5 h-5 text-white drop-shadow" />
+                  <h3 className="font-bold text-white text-lg drop-shadow">Chat</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsChatMinimized(true)}
+                    className="p-1.5 hover:bg-white/20 rounded-lg transition-all"
+                  >
+                    <Minimize2 className="w-4 h-4 text-white drop-shadow" />
+                  </button>
+                  <button
+                    onClick={() => setIsChatOpen(false)}
+                    className="p-1.5 hover:bg-white/20 rounded-lg transition-all"
+                  >
+                    <X className="w-4 h-4 text-white drop-shadow" />
+                  </button>
+                </div>
+              </div>
 
+              {/* Users List */}
+              <div className="bg-gradient-to-r from-pink-100 to-purple-100 p-3 border-b-2 border-pink-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <Users className="w-4 h-4 text-purple-600" />
+                  <span className="text-sm font-bold text-purple-900">Active Users</span>
+                  <span className="ml-auto bg-gradient-to-r from-pink-500 to-purple-500 text-white text-xs font-bold px-2 py-1 rounded-full shadow">
+                    {users.length}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {users.map((u, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border-2 border-pink-300 shadow-md"
+                    >
+                      <div className="w-6 h-6 bg-gradient-to-br from-pink-400 to-purple-500 rounded-full flex items-center justify-center text-white text-xs font-bold border-2 border-white shadow">
+                        {u.role?.charAt(0) || 'U'}
+                      </div>
+                      <span className="text-xs font-bold text-purple-900">{u.role}</span>
+                      <div className="w-2 h-2 bg-green-400 rounded-full border border-green-600 animate-pulse"></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gradient-to-br from-pink-50 to-purple-50">
+                {messages.map((m, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex ${m.sender === role ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-4 py-2 shadow-lg ${m.sender === role
+                          ? 'bg-gradient-to-r from-pink-500 to-purple-500 text-white border-2 border-pink-300'
+                          : 'bg-white text-purple-900 border-2 border-cyan-300'
+                        }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs font-bold ${m.sender === role ? 'text-pink-100' : 'text-purple-600'
+                          }`}>
+                          {m.sender}
+                        </span>
+                        <span className={`text-xs ${m.sender === role ? 'text-pink-200' : 'text-purple-400'
+                          }`}>
+                          {new Date(m.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <p className="text-sm font-medium">{m.text}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Chat Input */}
+              <div className="p-3 bg-white border-t-2 border-pink-200">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={msg}
+                    onChange={(e) => setMsg(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    placeholder="Type a message..."
+                    className="flex-1 bg-gradient-to-r from-pink-100 to-purple-100 text-purple-900 placeholder-purple-400 rounded-xl px-4 py-2 text-sm border-2 border-pink-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-300 outline-none transition-all font-medium"
+                  />
+                  <button
+                    onClick={handleSend}
+                    disabled={!msg.trim()}
+                    className="bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:from-gray-300 disabled:to-gray-400 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl transition-all flex items-center gap-2 shadow-lg border-2 border-white/30"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 mt-2 px-1">
+                  <Lock className="w-3 h-3 text-green-500" />
+                  <span className="text-xs text-purple-600 font-semibold">End-to-end encrypted</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

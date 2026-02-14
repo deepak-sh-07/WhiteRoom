@@ -19,7 +19,7 @@ export default function Home() {
 
     console.log(data);
 
-    if (res.status === 404) {
+    if (res.status !== 200) {
       router.push("/login");
       return;
     }
