@@ -14,6 +14,8 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { socket } from "@/lib/socket";
 import { useParams } from "next/navigation";
+import * as Y from "yjs";
+import { Awareness } from "y-protocols/awareness";
 import { Send, Users, Wifi, WifiOff, Shield, Lock, MessageSquare, X, Minimize2, Video, Mic, MicOff, VideoOff, PhoneOff } from 'lucide-react';
 export default function Room() {
   const { roomId } = useParams();
@@ -23,10 +25,13 @@ export default function Room() {
   const roomKeyRef = useRef(null);
   const [users, setUsers] = useState([]);
   const [messages, setMessages] = useState([]);
+
   const pcRef = useRef(null);
+  const peerConnectionsRef = useRef({});
+  const dataChannelsRef = useRef({});
   const localStreamRef = useRef(null);
   const pendingIce = useRef([]);
-  const dataChannelRef = useRef(null);
+
   const roleRef = useRef(null);
   const localVideoRef = useRef(null);
   const rsaKeyPairRef = useRef(null);
@@ -38,6 +43,10 @@ export default function Room() {
   const [isChatMinimized, setIsChatMinimized] = useState(false);
   const [isMicOn, setIsMicOn] = useState(true);
   const [isCameraOn, setIsCameraOn] = useState(true);
+
+  const ydocRef = useRef(null);
+  const awarenessRef = useRef(null);
+  const ymapRef = useRef(null);
 
   /* ---------------- MEDIA ---------------- */
   const startMedia = async () => { //it prepares media to be sent by attaching tracks to the RTCPeerConnection.
@@ -52,19 +61,24 @@ export default function Room() {
     localStreamRef.current = stream;
     localVideoRef.current.srcObject = stream;
 
-    stream.getTracks().forEach((track) =>
-      pcRef.current.addTrack(track, stream)
-    );
+    stream.getTracks().forEach((track) => {
+      if (pcRef.current) {
+        pcRef.current.addTrack(track, stream);
+      }
+    });
   };
 
   /* ---------------- DATA CHANNEL ---------------- */
   const createDataChannel = () => {
     const channel = pcRef.current.createDataChannel("chat");
-    dataChannelRef.current = channel;
+    const peerId = socket.id; // temporary until you improve signaling
+    dataChannelsRef.current[peerId] = channel;
 
     channel.onopen = async () => {
       console.log("✅ DataChannel open (host)");
-
+      if (ymapRef.current) {
+        ymapRef.current.set("lastConnected", Date.now());
+      }
       // 🔑 1️⃣ Generate AES room key FIRST
       roomKeyRef.current = await generateRoomKey();
 
@@ -91,24 +105,31 @@ export default function Room() {
   async function sendEncryptedChat(text) {
     if (!roomKeyRef.current) return;
 
-    const encryptedPayload = await encrypt(roomKeyRef.current, {
+    const message = {
       text,
       sender: roleRef.current ?? "unknown",
-    });
+      timestamp: Date.now(),
+    };
 
+    // 1️⃣ Add locally
+    setMessages(prev => [...prev, message]);
+
+    // 2️⃣ Encrypt
+    const encryptedPayload = await encrypt(roomKeyRef.current, message);
+
+    // 3️⃣ Send
     sendMessage("chat", encryptedPayload);
   }
-
   function sendMessage(type, payload) {
-    const channel = dataChannelRef.current;
-    if (!channel || channel.readyState !== "open") return;
+  const channel = dataChannelsRef.current["active"];
+  if (!channel || channel.readyState !== "open") return;
 
-    channel.send(JSON.stringify({
-      type,
-      payload,
-      ts: Date.now()
-    }));
-  }
+  channel.send(JSON.stringify({
+    type,
+    payload,
+    ts: Date.now()
+  }));
+}
   async function handleMessage(raw) {
     const msg = JSON.parse(raw);
 
@@ -178,6 +199,32 @@ export default function Room() {
 
         break;
 
+      case "yjs-update": {
+        if (!roomKeyRef.current) return;
+
+        try {
+          const decrypted = await decrypt(roomKeyRef.current, msg.payload);
+          const update = new Uint8Array(decrypted);
+
+          Y.applyUpdate(ydocRef.current, update, "remote");
+
+          // If host, forward to all other peers
+          if (roleRef.current === "host") {
+            Object.entries(dataChannelsRef.current).forEach(([peerId, channel]) => {
+              if (channel.readyState === "open") {
+                channel.send(JSON.stringify({
+                  type: "yjs-update",
+                  payload: msg.payload,
+                  ts: Date.now()
+                }));
+              }
+            });
+          }
+
+        } catch { }
+
+        break;
+      }
 
     }
   }
@@ -192,7 +239,30 @@ export default function Room() {
     }
   }
 
+  useEffect(() => {
+    const ydoc = new Y.Doc();
+    ydocRef.current = ydoc;
 
+    // Shared test map
+    ymapRef.current = ydoc.getMap("room-state");
+
+    // Awareness
+    awarenessRef.current = new Awareness(ydoc);
+
+    // 🔁 Send Yjs updates over encrypted channel
+    ydoc.on("update", async (update, origin) => {
+      if (origin === "remote") return;
+      if (!roomKeyRef.current) return;
+
+      const encrypted = await encrypt(
+        roomKeyRef.current,
+        Array.from(update)
+      );
+
+      sendMessage("yjs-update", encrypted);
+    });
+
+  }, []);
   useEffect(() => {
     const handleRole = async ({ role }) => {
       roleRef.current = role;
@@ -264,11 +334,14 @@ export default function Room() {
 
       pc.ondatachannel = (e) => { // data channel will listen to the upcoming msg and call handle message
         const channel = e.channel;
-        dataChannelRef.current = channel;
+        const peerId = socket.id; // temporary until you improve signaling
+        dataChannelsRef.current[peerId] = channel;
 
         channel.onopen = async () => {
           console.log("✅ DataChannel open (peer)");
-
+          if (ymapRef.current) {
+            ymapRef.current.set("lastConnected", Date.now());
+          }
           rsaKeyPairRef.current = await generateRSAKeyPair();
 
           const publicKey = await exportPublicKey(
@@ -364,7 +437,9 @@ export default function Room() {
         roleRef.current = null;
         peerReadyRef.current = false;
 
-        pc.close();
+        if (pcRef.current) {
+          pcRef.current.close();
+        }
 
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -413,8 +488,8 @@ export default function Room() {
 
             <div className="flex items-center gap-3">
               <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border-2 ${connected
-                  ? 'bg-green-400/30 border-green-300 shadow-lg shadow-green-400/20'
-                  : 'bg-red-400/30 border-red-300 shadow-lg shadow-red-400/20'
+                ? 'bg-green-400/30 border-green-300 shadow-lg shadow-green-400/20'
+                : 'bg-red-400/30 border-red-300 shadow-lg shadow-red-400/20'
                 }`}>
                 {connected ? (
                   <>
@@ -496,8 +571,8 @@ export default function Room() {
             <button
               onClick={() => setIsMicOn(!isMicOn)}
               className={`p-4 rounded-2xl border-2 transition-all shadow-lg ${isMicOn
-                  ? 'bg-white/20 border-white/40 hover:bg-white/30'
-                  : 'bg-red-500 border-red-400 hover:bg-red-600'
+                ? 'bg-white/20 border-white/40 hover:bg-white/30'
+                : 'bg-red-500 border-red-400 hover:bg-red-600'
                 }`}
             >
               {isMicOn ? (
@@ -510,8 +585,8 @@ export default function Room() {
             <button
               onClick={() => setIsCameraOn(!isCameraOn)}
               className={`p-4 rounded-2xl border-2 transition-all shadow-lg ${isCameraOn
-                  ? 'bg-white/20 border-white/40 hover:bg-white/30'
-                  : 'bg-red-500 border-red-400 hover:bg-red-600'
+                ? 'bg-white/20 border-white/40 hover:bg-white/30'
+                : 'bg-red-500 border-red-400 hover:bg-red-600'
                 }`}
             >
               {isCameraOn ? (
@@ -602,8 +677,8 @@ export default function Room() {
                   >
                     <div
                       className={`max-w-[85%] rounded-2xl px-4 py-2 shadow-lg ${m.sender === role
-                          ? 'bg-gradient-to-r from-pink-500 to-purple-500 text-white border-2 border-pink-300'
-                          : 'bg-white text-purple-900 border-2 border-cyan-300'
+                        ? 'bg-gradient-to-r from-pink-500 to-purple-500 text-white border-2 border-pink-300'
+                        : 'bg-white text-purple-900 border-2 border-cyan-300'
                         }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
@@ -631,12 +706,12 @@ export default function Room() {
                     onChange={(e) => setMsg(e.target.value)}
                     onKeyPress={handleKeyPress}
                     placeholder="Type a message..."
-                    className="flex-1 bg-gradient-to-r from-pink-100 to-purple-100 text-purple-900 placeholder-purple-400 rounded-xl px-4 py-2 text-sm border-2 border-pink-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-300 outline-none transition-all font-medium"
+                    className="flex-1 bg-linear-to-r from-pink-100 to-purple-100 text-purple-900 placeholder-purple-400 rounded-xl px-4 py-2 text-sm border-2 border-pink-300 focus:border-purple-400 focus:ring-2 focus:ring-purple-300 outline-none transition-all font-medium"
                   />
                   <button
                     onClick={handleSend}
                     disabled={!msg.trim()}
-                    className="bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:from-gray-300 disabled:to-gray-400 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl transition-all flex items-center gap-2 shadow-lg border-2 border-white/30"
+                    className="bg-linear-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:from-gray-300 disabled:to-gray-400 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl transition-all flex items-center gap-2 shadow-lg border-2 border-white/30"
                   >
                     <Send className="w-4 h-4" />
                   </button>
