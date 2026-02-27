@@ -15,6 +15,9 @@ const io = new Server(server, {
   },
 });
 
+// Track host per room
+const roomHosts = new Map(); // roomId → hostSocketId
+
 io.on("connection", (socket) => {
   console.log("🔌 Connected:", socket.id);
 
@@ -23,32 +26,63 @@ io.on("connection", (socket) => {
     const isHost = !room || room.size === 0;
 
     socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.isHost = isHost;
 
-    socket.emit("role", { role: isHost ? "host" : "peer" });
-
-    if (!isHost) {
-      socket.to(roomId).emit("peer-ready");
+    if (isHost) {
+      roomHosts.set(roomId, socket.id);
+      socket.emit("role", { role: "host" });
+      socket.emit("room-peers", { peers: [], isHost: true });
+      console.log(`👑 ${socket.id} is HOST of ${roomId}`);
+    } else {
+      // Tell the new peer who the host is
+      const hostId = roomHosts.get(roomId);
+      socket.emit("role", { role: "peer" });
+      socket.emit("room-peers", { peers: hostId ? [hostId] : [], isHost: false });
+      // Tell the host a new peer joined
+      if (hostId) io.to(hostId).emit("peer-joined", { peerId: socket.id });
+      console.log(`👤 ${socket.id} joined ${roomId} as peer, host: ${hostId}`);
     }
-
-    console.log(
-      `👤 ${socket.id} joined ${roomId} as ${isHost ? "host" : "peer"}`
-    );
   });
 
-  socket.on("offer", ({ roomId, offer }) => {
-    socket.to(roomId).emit("offer", { offer });
+  // Targeted signaling
+  socket.on("offer", ({ roomId, offer, targetId }) => {
+    if (targetId) {
+      io.to(targetId).emit("offer", { offer, fromId: socket.id });
+    } else {
+      socket.to(roomId).emit("offer", { offer, fromId: socket.id });
+    }
   });
 
-  socket.on("answer", ({ roomId, answer }) => {
-    socket.to(roomId).emit("answer", { answer });
+  socket.on("answer", ({ roomId, answer, targetId }) => {
+    if (targetId) {
+      io.to(targetId).emit("answer", { answer, fromId: socket.id });
+    } else {
+      socket.to(roomId).emit("answer", { answer, fromId: socket.id });
+    }
   });
 
-  socket.on("ice-candidate", ({ roomId, candidate }) => {
-    socket.to(roomId).emit("ice-candidate", { candidate });
+  socket.on("ice-candidate", ({ roomId, candidate, targetId }) => {
+    if (targetId) {
+      io.to(targetId).emit("ice-candidate", { candidate, fromId: socket.id });
+    } else {
+      socket.to(roomId).emit("ice-candidate", { candidate, fromId: socket.id });
+    }
   });
 
   socket.on("disconnect", () => {
     console.log("❌ Disconnected:", socket.id);
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    if (socket.data.isHost) {
+      roomHosts.delete(roomId);
+      // Notify all peers host left
+      socket.to(roomId).emit("peer-left", { peerId: socket.id });
+    } else {
+      // Notify host that peer left
+      const hostId = roomHosts.get(roomId);
+      if (hostId) io.to(hostId).emit("peer-left", { peerId: socket.id });
+    }
   });
 });
 

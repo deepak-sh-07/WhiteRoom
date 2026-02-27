@@ -19,7 +19,9 @@
     "react-dom": "19.2.3",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
+    "tldraw": "^4.4.0",
     "twilio": "^5.12.0",
+    "y-protocols": "^1.0.7",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.29"
   },
