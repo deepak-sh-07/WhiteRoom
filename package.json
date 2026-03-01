@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@prisma/client": "5.22.0",
+    "@tiptap/extension-collaboration": "^3.20.0",
+    "@tiptap/react": "^3.20.0",
     "bcrypt": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.562.0",
@@ -21,6 +23,7 @@
     "socket.io-client": "^4.8.3",
     "tldraw": "^4.4.0",
     "twilio": "^5.12.0",
+    "y-prosemirror": "^1.3.7",
     "y-protocols": "^1.0.7",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.29"
