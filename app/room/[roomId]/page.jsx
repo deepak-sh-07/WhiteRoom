@@ -6,9 +6,17 @@ import { useParams } from "next/navigation";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import dynamic from "next/dynamic";
+import { motion } from "framer-motion";
+import { Lock, Shield, MessageSquare } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
-import { Send, Users, Shield, Lock, MessageSquare, X, Minimize2, Video, Mic, MicOff, VideoOff, PhoneOff, PenLine, Monitor, FileText } from 'lucide-react';
+
+// ── New design-system components ──
+import StatusBadge   from "@/components/StatusBadge";
+import ViewSwitcher  from "@/components/ViewSwitcher";
+import VideoTile     from "@/components/VideoTile";
+import ControlBar    from "@/components/ControlBar";
+import ChatPanel     from "@/components/ChatPanel";
 
 export default function Room() {
   const { roomId } = useParams();
@@ -19,27 +27,26 @@ export default function Room() {
   const [msg, setMsg]                   = useState("");
   const [users, setUsers]               = useState([]);
   const [messages, setMessages]         = useState([]);
-  const [remoteStreams, setRemoteStreams] = useState({});   // { [socketId]: MediaStream }
-  const [allPeerIds, setAllPeerIds]     = useState([]);    // every remote socket id
+  const [remoteStreams, setRemoteStreams] = useState({});
+  const [allPeerIds, setAllPeerIds]     = useState([]);
   const [isChatOpen, setIsChatOpen]     = useState(true);
-  const [isChatMinimized, setIsChatMinimized] = useState(false);
   const [isMicOn, setIsMicOn]           = useState(true);
   const [isCameraOn, setIsCameraOn]     = useState(true);
-  const [view, setView]                 = useState("video");
+  const [view, setView] = useState("video"); // "video" | "whiteboard" | "docs"
 
   // ── Stable refs (never stale) ──
-  const roomIdRef          = useRef(roomId);
-  const localStreamRef     = useRef(null);
-  const localVideoRef      = useRef(null);
-  const roleRef            = useRef(null);
-  const pcsRef             = useRef({});    // { [peerId]: RTCPeerConnection }
-  const dcsRef             = useRef({});    // { [peerId]: RTCDataChannel }
-  const roomKeysRef        = useRef({});
-  const rsaKeysRef         = useRef({});
-  const peerPubKeysRef     = useRef({});
-  const pendingIceRef      = useRef({});
-  const ydocRef            = useRef(null);
-  const awarenessRef       = useRef(null);
+  const roomIdRef      = useRef(roomId);
+  const localStreamRef = useRef(null);
+  const localVideoRef  = useRef(null);
+  const roleRef        = useRef(null);
+  const pcsRef         = useRef({});
+  const dcsRef         = useRef({});
+  const roomKeysRef    = useRef({});
+  const rsaKeysRef     = useRef({});
+  const peerPubKeysRef = useRef({});
+  const pendingIceRef  = useRef({});
+  const ydocRef        = useRef(null);
+  const awarenessRef   = useRef(null);
 
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
 
@@ -75,7 +82,6 @@ export default function Room() {
     const pc = new RTCPeerConnection({ iceServers });
     pcsRef.current[peerId] = pc;
 
-    // Add every local track immediately
     const stream = localStreamRef.current;
     if (stream) {
       stream.getTracks().forEach(t => {
@@ -94,9 +100,7 @@ export default function Room() {
     };
 
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate) {
-        socket.emit("ice-candidate", { roomId: roomIdRef.current, candidate, targetId: peerId });
-      }
+      if (candidate) socket.emit("ice-candidate", { roomId: roomIdRef.current, candidate, targetId: peerId });
     };
 
     pc.oniceconnectionstatechange = () => console.log(`[pc:${peerId}] ICE: ${pc.iceConnectionState}`);
@@ -107,7 +111,6 @@ export default function Room() {
       bindDc(channel, peerId);
     };
 
-    // Show tile immediately (amber = connecting, green = has video)
     setAllPeerIds(prev => prev.includes(peerId) ? prev : [...prev, peerId]);
     return pc;
   };
@@ -118,8 +121,8 @@ export default function Room() {
   const bindDc = (channel, peerId) => {
     channel.onopen = async () => {
       console.log(`[dc:${peerId}] open`);
-      roomKeysRef.current[peerId]    = await generateRoomKey();
-      rsaKeysRef.current[peerId]     = await generateRSAKeyPair();
+      roomKeysRef.current[peerId] = await generateRoomKey();
+      rsaKeysRef.current[peerId]  = await generateRSAKeyPair();
       const pub = await exportPublicKey(rsaKeysRef.current[peerId].publicKey);
       sendTo(peerId, "control", { action: "PUBLIC_KEY", key: pub });
       broadcastAwareness();
@@ -229,8 +232,6 @@ export default function Room() {
   useEffect(() => {
     if (!roomId) return;
 
-    // ── helpers that are always fresh because they close over refs, not state ──
-
     const addTracksTo = (pc) => {
       const s = localStreamRef.current;
       if (!s) return;
@@ -243,14 +244,12 @@ export default function Room() {
       });
     };
 
-    // ── New joiner: server sends us the full list of existing peers ──
     const onRoomPeers = async ({ peers }) => {
       console.log("[signaling] room-peers:", peers);
       await getMedia();
       for (const peerId of peers) {
         const pc = await makePc(peerId);
         addTracksTo(pc);
-        // We are the OFFERER for every existing peer
         const dc = pc.createDataChannel("chat");
         dcsRef.current[peerId] = dc;
         bindDc(dc, peerId);
@@ -261,43 +260,33 @@ export default function Room() {
       }
     };
 
-    // ── Existing peer: someone new joined, they will offer us shortly ──
     const onPeerJoined = async ({ peerId }) => {
       console.log(`[signaling] peer-joined: ${peerId}`);
-      await getMedia(); // warm up so we can addTrack in onOffer
+      await getMedia();
     };
 
-    // ── We receive an offer → answer it ──
     const onOffer = async ({ offer, fromId }) => {
       console.log(`[signaling] ← offer from ${fromId}`);
       await getMedia();
-
-      // Clean up any stale PC in a bad state
       const existing = pcsRef.current[fromId];
       if (existing && existing.signalingState !== "stable") {
         console.log(`[signaling] closing stale PC for ${fromId} (was ${existing.signalingState})`);
         existing.close();
         delete pcsRef.current[fromId];
       }
-
       const pc = await makePc(fromId);
       addTracksTo(pc);
-
       await pc.setRemoteDescription(offer);
-
-      // Flush buffered ICE candidates
       for (const c of (pendingIceRef.current[fromId] ?? [])) {
         await pc.addIceCandidate(c).catch(() => {});
       }
       pendingIceRef.current[fromId] = [];
-
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       console.log(`[signaling] → answer to ${fromId}`);
       socket.emit("answer", { roomId, answer, targetId: fromId });
     };
 
-    // ── We receive an answer to our offer ──
     const onAnswer = async ({ answer, fromId }) => {
       console.log(`[signaling] ← answer from ${fromId}`);
       const pc = pcsRef.current[fromId];
@@ -310,7 +299,6 @@ export default function Room() {
       pendingIceRef.current[fromId] = [];
     };
 
-    // ── ICE candidate ──
     const onIce = async ({ candidate, fromId }) => {
       const pc = pcsRef.current[fromId];
       if (pc?.remoteDescription) {
@@ -321,7 +309,6 @@ export default function Room() {
       }
     };
 
-    // ── Peer left ──
     const onPeerLeft = ({ peerId }) => {
       console.log(`[signaling] peer-left: ${peerId}`);
       pcsRef.current[peerId]?.close();
@@ -332,7 +319,6 @@ export default function Room() {
       setAllPeerIds(p => p.filter(id => id !== peerId));
     };
 
-    // ── Role ──
     const onRole = ({ role }) => {
       roleRef.current = role;
       setRole(role);
@@ -343,25 +329,22 @@ export default function Room() {
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
 
-    // ── Connect & join ──
     const onConnect = () => {
       console.log("[signaling] connected, joining room:", roomId);
       setConnected(true);
       socket.emit("join-room", roomId);
     };
 
-    // Register ALL listeners before connecting
-    socket.on("connect",      onConnect);
-    socket.on("role",         onRole);
-    socket.on("room-peers",   onRoomPeers);
-    socket.on("peer-joined",  onPeerJoined);
-    socket.on("offer",        onOffer);
-    socket.on("answer",       onAnswer);
+    socket.on("connect",       onConnect);
+    socket.on("role",          onRole);
+    socket.on("room-peers",    onRoomPeers);
+    socket.on("peer-joined",   onPeerJoined);
+    socket.on("offer",         onOffer);
+    socket.on("answer",        onAnswer);
     socket.on("ice-candidate", onIce);
-    socket.on("peer-left",    onPeerLeft);
+    socket.on("peer-left",     onPeerLeft);
 
     if (socket.connected) {
-      // Already connected (e.g. hot reload)
       setConnected(true);
       socket.emit("join-room", roomId);
     } else {
@@ -369,14 +352,14 @@ export default function Room() {
     }
 
     return () => {
-      socket.off("connect",      onConnect);
-      socket.off("role",         onRole);
-      socket.off("room-peers",   onRoomPeers);
-      socket.off("peer-joined",  onPeerJoined);
-      socket.off("offer",        onOffer);
-      socket.off("answer",       onAnswer);
+      socket.off("connect",       onConnect);
+      socket.off("role",          onRole);
+      socket.off("room-peers",    onRoomPeers);
+      socket.off("peer-joined",   onPeerJoined);
+      socket.off("offer",         onOffer);
+      socket.off("answer",        onAnswer);
       socket.off("ice-candidate", onIce);
-      socket.off("peer-left",    onPeerLeft);
+      socket.off("peer-left",     onPeerLeft);
       Object.values(pcsRef.current).forEach(pc => pc.close());
       pcsRef.current = {};
       dcsRef.current = {};
@@ -404,11 +387,12 @@ export default function Room() {
     }
   };
 
-  const handleSend      = () => { sendEncryptedChat(msg); setMsg(""); };
-  const handleKeyDown   = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
-  const toggleMic       = () => { localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !isMicOn; }); setIsMicOn(v => !v); };
-  const toggleCamera    = () => { localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !isCameraOn; }); setIsCameraOn(v => !v); };
-  const sendWbMsg       = useCallback((type, payload) => broadcast(type, payload), []);
+  // msg/handleSend/handleKeyDown kept for ChatPanel's onSend prop
+  const handleSend    = () => { sendEncryptedChat(msg); setMsg(""); };
+  const handleKeyDown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
+  const toggleMic     = () => { localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !isMicOn; }); setIsMicOn(v => !v); };
+  const toggleCamera  = () => { localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !isCameraOn; }); setIsCameraOn(v => !v); };
+  const sendWbMsg     = useCallback((type, payload) => broadcast(type, payload), []);
 
   // ── Grid layout ──
   const totalTiles = 1 + allPeerIds.length;
@@ -416,212 +400,126 @@ export default function Room() {
   const rows = totalTiles === 1 ? 1 : totalTiles <= 2 ? 1 : totalTiles <= 4 ? 2 : Math.ceil(totalTiles / 3);
 
   // ══════════════════════════════════════════
-  //  STYLES
-  // ══════════════════════════════════════════
-  const S = {
-    outer:   { minHeight: "100vh", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif", color: "#e2e8f0", display: "flex", flexDirection: "column" },
-    glow:    { position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0, background: "radial-gradient(ellipse 80% 50% at 20% 20%,rgba(99,102,241,.07),transparent 60%),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(20,184,166,.06),transparent 60%)" },
-    layout:  { width: "100%", height: "100vh", display: "flex", flexDirection: "column", position: "relative", zIndex: 1, padding: "12px" },
-    header:  { background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "16px 16px 0 0", border: "1px solid rgba(99,102,241,.15)", padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px", boxShadow: "0 4px 24px rgba(0,0,0,.4)" },
-    logoBox: { width: "36px", height: "36px", borderRadius: "10px", background: "linear-gradient(135deg,#6366f1,#14b8a6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 16px rgba(99,102,241,.4)" },
-    main:    { flex: 1, background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)", overflow: "hidden", position: "relative" },
-    footer:  { background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "0 0 16px 16px", border: "1px solid rgba(99,102,241,.15)", borderTop: "1px solid rgba(99,102,241,.1)", padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", boxShadow: "0 -4px 24px rgba(0,0,0,.3)" },
-    tile:    { position: "relative", borderRadius: "14px", overflow: "hidden", minHeight: 0 },
-  };
-
-  // ══════════════════════════════════════════
   //  RENDER
   // ══════════════════════════════════════════
   return (
-    <div style={S.outer}>
-      <div style={S.glow} />
-      <div style={S.layout}>
+    <div className="relative w-full h-screen overflow-hidden flex flex-col"
+         style={{ background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif", color: "#e2e8f0" }}>
+
+      {/* Background glow */}
+      <div className="fixed inset-0 pointer-events-none z-0"
+           style={{ background: "radial-gradient(ellipse 80% 50% at 20% 20%,rgba(99,102,241,.07),transparent 60%),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(20,184,166,.06),transparent 60%)" }} />
+
+      <div className="relative z-10 flex flex-col h-full" style={{ padding: "12px" }}>
 
         {/* ── Header ── */}
-        <div style={S.header}>
-          <div style={{ display:"flex", alignItems:"center", gap:"12px" }}>
-            <div style={S.logoBox}><Lock className="w-4 h-4" style={{ color:"white" }} /></div>
+        <motion.header
+          initial={{ y: -16, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          className="flex items-center justify-between flex-wrap gap-3"
+          style={{ background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "16px 16px 0 0", border: "1px solid rgba(99,102,241,.15)", padding: "14px 20px", boxShadow: "0 4px 24px rgba(0,0,0,.4)" }}
+        >
+          {/* Logo + room id */}
+          <div className="flex items-center gap-3">
+            <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: "linear-gradient(135deg,#6366f1,#14b8a6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 16px rgba(99,102,241,.4)" }}>
+              <Lock className="w-4 h-4 text-white" />
+            </div>
             <div>
-              <h1 style={{ fontSize:"15px", fontWeight:"700", color:"#f1f5f9", margin:0 }}>WhiteRoom</h1>
-              <p style={{ fontSize:"11px", color:"#64748b", margin:0, fontFamily:"monospace" }}>{roomId}</p>
+              <h1 style={{ fontSize: "15px", fontWeight: "700", color: "#f1f5f9", margin: 0 }}>WhiteRoom</h1>
+              <p style={{ fontSize: "11px", color: "#64748b", margin: 0, fontFamily: "monospace" }}>{roomId}</p>
             </div>
           </div>
-          <div style={{ display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap" }}>
-            <div style={{ display:"flex", alignItems:"center", gap:"6px", padding:"6px 12px", borderRadius:"8px", background: connected ? "rgba(16,185,129,.1)" : "rgba(239,68,68,.1)", border:"1px solid "+(connected ? "rgba(16,185,129,.3)" : "rgba(239,68,68,.3)") }}>
-              <div style={{ width:"6px", height:"6px", borderRadius:"50%", background: connected ? "#10b981" : "#ef4444", boxShadow: connected ? "0 0 6px #10b981" : "none" }} />
-              <span style={{ fontSize:"12px", fontWeight:"600", color: connected ? "#10b981" : "#ef4444" }}>{connected ? "Live" : "Offline"}</span>
+
+          {/* Controls */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* StatusBadge — replaces the inline connected pill */}
+            <StatusBadge connected={connected} />
+
+            {/* Role badge */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg"
+                 style={{ background: "rgba(99,102,241,.1)", border: "1px solid rgba(99,102,241,.25)" }}>
+              <Shield className="w-3 h-3" style={{ color: "#818cf8" }} />
+              <span style={{ fontSize: "12px", fontWeight: "600", color: "#818cf8", textTransform: "capitalize" }}>{role}</span>
             </div>
-            <div style={{ display:"flex", alignItems:"center", gap:"6px", padding:"6px 12px", borderRadius:"8px", background:"rgba(99,102,241,.1)", border:"1px solid rgba(99,102,241,.25)" }}>
-              <Shield className="w-3 h-3" style={{ color:"#818cf8" }} />
-              <span style={{ fontSize:"12px", fontWeight:"600", color:"#818cf8", textTransform:"capitalize" }}>{role}</span>
-            </div>
-            <div style={{ display:"flex", borderRadius:"10px", overflow:"hidden", background:"rgba(255,255,255,.04)", border:"1px solid rgba(255,255,255,.08)" }}>
-              <button onClick={() => setView("video")} style={{ display:"flex", alignItems:"center", gap:"6px", padding:"7px 14px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background: view==="video" ? "rgba(99,102,241,.25)" : "transparent", color: view==="video" ? "#818cf8" : "#64748b" }}>
-                <Monitor className="w-3.5 h-3.5" /> Video
-              </button>
-              <button onClick={() => setView("whiteboard")} style={{ display:"flex", alignItems:"center", gap:"6px", padding:"7px 14px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background: view==="whiteboard" ? "rgba(20,184,166,.2)" : "transparent", color: view==="whiteboard" ? "#14b8a6" : "#64748b" }}>
-                <PenLine className="w-3.5 h-3.5" /> Board
-              </button>
-              <button onClick={() => setView("docs")} style={{ display:"flex", alignItems:"center", gap:"6px", padding:"7px 14px", border:"none", cursor:"pointer", fontSize:"12px", fontWeight:"600", background: view==="docs" ? "rgba(201,168,76,.2)" : "transparent", color: view==="docs" ? "#c9a84c" : "#64748b" }}>
-                <FileText className="w-3.5 h-3.5" /> Docs
-              </button>
-            </div>
-            <button onClick={() => { setIsChatOpen(!isChatOpen); setIsChatMinimized(false); }} style={{ display:"flex", alignItems:"center", gap:"6px", padding:"7px 14px", borderRadius:"8px", border:"1px solid rgba(255,255,255,.08)", background: isChatOpen ? "rgba(99,102,241,.15)" : "rgba(255,255,255,.04)", color: isChatOpen ? "#818cf8" : "#64748b", cursor:"pointer", fontSize:"12px", fontWeight:"600" }}>
-              <MessageSquare className="w-3.5 h-3.5" />{isChatOpen ? "Hide Chat" : "Chat"}
+
+            {/* ViewSwitcher — replaces the three inline view buttons */}
+            <ViewSwitcher view={view} setView={setView} />
+
+            {/* Chat toggle */}
+            <button
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className="flex items-center gap-1.5 cursor-pointer"
+              style={{ padding: "7px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,.08)", background: isChatOpen ? "rgba(99,102,241,.15)" : "rgba(255,255,255,.04)", color: isChatOpen ? "#818cf8" : "#64748b", fontSize: "12px", fontWeight: "600" }}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              {isChatOpen ? "Hide Chat" : "Chat"}
             </button>
           </div>
-        </div>
+        </motion.header>
 
         {/* ── Main ── */}
-        <div style={S.main}>
+        <div className="flex-1 relative overflow-hidden"
+             style={{ background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)" }}>
 
           {/* Video grid */}
-          <div style={{ position:"absolute", inset:0, padding:"10px", display: view==="video" ? "grid" : "none", gap:"10px", gridTemplateColumns:`repeat(${cols},1fr)`, gridTemplateRows:`repeat(${rows},1fr)` }}>
+          <div style={{ position: "absolute", inset: 0, padding: "10px", display: view === "video" ? "grid" : "none", gap: "10px", gridTemplateColumns: `repeat(${cols},1fr)`, gridTemplateRows: `repeat(${rows},1fr)` }}>
 
-            {/* Local tile */}
-            <div style={{ ...S.tile, background:"linear-gradient(135deg,#1e1b4b,#1e293b)", border:"1px solid rgba(99,102,241,.25)", boxShadow:"0 8px 32px rgba(0,0,0,.5)" }}>
-              <video ref={localVideoRef} autoPlay muted playsInline style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
-              {!isCameraOn && (
-                <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:"8px", background:"linear-gradient(135deg,#1e1b4b,#1e293b)" }}>
-                  <VideoOff className="w-8 h-8" style={{ color:"#818cf8", opacity:.5 }} />
-                  <span style={{ fontSize:"11px", color:"#64748b" }}>Camera off</span>
-                </div>
-              )}
-              <div style={{ position:"absolute", inset:0, background:"linear-gradient(to top,rgba(0,0,0,.6),transparent 45%)", pointerEvents:"none" }} />
-              <div style={{ position:"absolute", bottom:"10px", left:"10px", background:"rgba(0,0,0,.55)", backdropFilter:"blur(8px)", padding:"4px 10px", borderRadius:"20px", border:"1px solid rgba(255,255,255,.1)" }}>
-                <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>You · {role}</span>
-              </div>
-              <div style={{ position:"absolute", top:"10px", right:"10px" }}>
-                <div style={{ width:"7px", height:"7px", borderRadius:"50%", background:"#10b981", boxShadow:"0 0 6px #10b981" }} />
-              </div>
-            </div>
+            {/* Local tile — VideoTile handles camera-off state + label + status dot */}
+            <VideoTile
+              videoRef={localVideoRef}
+              isLocal
+              isCameraOn={isCameraOn}
+              label={`You · ${role}`}
+              variant="local"
+            />
 
             {/* Remote tiles */}
-            {allPeerIds.map((peerId, idx) => {
-              const stream = remoteStreams[peerId];
-              return (
-                <div key={peerId} style={{ ...S.tile, background:"linear-gradient(135deg,#0f2a2a,#1e293b)", border:"1px solid rgba(20,184,166,.2)", boxShadow:"0 8px 32px rgba(0,0,0,.5)" }}>
-                  <video autoPlay playsInline
-                    ref={el => { if (el && stream && el.srcObject !== stream) el.srcObject = stream; }}
-                    style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }}
-                  />
-                  {!stream && (
-                    <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:"8px", background:"linear-gradient(135deg,#0f2a2a,#1e293b)" }}>
-                      <VideoOff className="w-8 h-8" style={{ color:"#14b8a6", opacity:.5 }} />
-                      <span style={{ fontSize:"12px", color:"#64748b" }}>Connecting…</span>
-                    </div>
-                  )}
-                  <div style={{ position:"absolute", inset:0, background:"linear-gradient(to top,rgba(0,0,0,.6),transparent 45%)", pointerEvents:"none" }} />
-                  <div style={{ position:"absolute", bottom:"10px", left:"10px", background:"rgba(0,0,0,.55)", backdropFilter:"blur(8px)", padding:"4px 10px", borderRadius:"20px", border:"1px solid rgba(255,255,255,.1)" }}>
-                    <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>Peer {idx+1}</span>
-                  </div>
-                  <div style={{ position:"absolute", top:"10px", right:"10px" }}>
-                    <div style={{ width:"7px", height:"7px", borderRadius:"50%", background: stream ? "#10b981" : "#f59e0b", boxShadow: stream ? "0 0 6px #10b981" : "0 0 6px #f59e0b" }} />
-                  </div>
-                </div>
-              );
-            })}
+            {allPeerIds.map((peerId, idx) => (
+              <VideoTile
+                key={peerId}
+                stream={remoteStreams[peerId]}
+                label={`Peer ${idx + 1}`}
+                variant="remote"
+              />
+            ))}
           </div>
 
           {/* Whiteboard */}
-          <div style={{ position:"absolute", inset:0, zIndex:2, display: view==="whiteboard" ? "block" : "none" }}>
+          <div style={{ position: "absolute", inset: 0, zIndex: 2, display: view === "whiteboard" ? "block" : "none" }}>
             <WhiteboardPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} />
           </div>
 
           {/* Docs */}
-          <div style={{ position:"absolute", inset:0, zIndex:2, display: view==="docs" ? "block" : "none" }}>
-            <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} localName={users.find(u=>u.isLocal)?.name ?? "You"} localColor={users.find(u=>u.isLocal)?.color ?? "#c9a84c"} />
+          <div style={{ position: "absolute", inset: 0, zIndex: 2, display: view === "docs" ? "block" : "none" }}>
+            <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users}
+              localName={users.find(u => u.isLocal)?.name ?? "You"}
+              localColor={users.find(u => u.isLocal)?.color ?? "#c9a84c"} />
           </div>
+
         </div>
 
-        {/* ── Footer ── */}
-        <div style={S.footer}>
-          <button onClick={toggleMic} style={{ width:"48px", height:"48px", borderRadius:"14px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", background: isMicOn ? "rgba(255,255,255,.07)" : "rgba(239,68,68,.2)", border:"1px solid "+(isMicOn ? "rgba(255,255,255,.1)" : "rgba(239,68,68,.4)"), color: isMicOn ? "#94a3b8" : "#ef4444" }}>
-            {isMicOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-          </button>
-          <button onClick={toggleCamera} style={{ width:"48px", height:"48px", borderRadius:"14px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", background: isCameraOn ? "rgba(255,255,255,.07)" : "rgba(239,68,68,.2)", border:"1px solid "+(isCameraOn ? "rgba(255,255,255,.1)" : "rgba(239,68,68,.4)"), color: isCameraOn ? "#94a3b8" : "#ef4444" }}>
-            {isCameraOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-          </button>
-          <button style={{ width:"52px", height:"52px", borderRadius:"14px", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(135deg,#ef4444,#dc2626)", color:"white", boxShadow:"0 4px 16px rgba(239,68,68,.35)" }}>
-            <PhoneOff className="w-5 h-5" />
-          </button>
-        </div>
+        {/* ── Footer — ControlBar replaces the three inline buttons ── */}
+        <motion.div
+          initial={{ y: 16, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 0.1 }}
+          style={{ background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "0 0 16px 16px", border: "1px solid rgba(99,102,241,.15)", borderTop: "1px solid rgba(99,102,241,.1)", boxShadow: "0 -4px 24px rgba(0,0,0,.3)" }}
+        >
+          <ControlBar isMicOn={isMicOn} isCameraOn={isCameraOn} toggleMic={toggleMic} toggleCamera={toggleCamera} />
+        </motion.div>
 
       </div>
 
-      {/* ── Floating Chat ── */}
-      {isChatOpen && (
-        <div style={{ position:"fixed", bottom:"20px", right:"20px", zIndex:50 }}>
-          {isChatMinimized ? (
-            <button onClick={() => setIsChatMinimized(false)} style={{ position:"relative", width:"52px", height:"52px", borderRadius:"16px", background:"linear-gradient(135deg,#6366f1,#4f46e5)", border:"1px solid rgba(99,102,241,.4)", display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", boxShadow:"0 8px 24px rgba(99,102,241,.35)", color:"white" }}>
-              <MessageSquare className="w-5 h-5" />
-              {messages.length > 0 && <span style={{ position:"absolute", top:"-6px", right:"-6px", background:"#14b8a6", color:"white", fontSize:"10px", fontWeight:"700", width:"18px", height:"18px", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", border:"2px solid #0a0a0f" }}>{messages.length}</span>}
-            </button>
-          ) : (
-            <div style={{ width:"360px", height:"580px", background:"rgba(13,15,23,.95)", backdropFilter:"blur(24px)", borderRadius:"20px", border:"1px solid rgba(99,102,241,.2)", boxShadow:"0 24px 64px rgba(0,0,0,.6)", display:"flex", flexDirection:"column", overflow:"hidden" }}>
-              <div style={{ padding:"16px 18px", borderBottom:"1px solid rgba(255,255,255,.06)", display:"flex", alignItems:"center", justifyContent:"space-between", background:"rgba(99,102,241,.08)" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
-                  <div style={{ width:"28px", height:"28px", borderRadius:"8px", background:"linear-gradient(135deg,#6366f1,#4f46e5)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                    <MessageSquare className="w-3.5 h-3.5" style={{ color:"white" }} />
-                  </div>
-                  <span style={{ fontSize:"14px", fontWeight:"700", color:"#f1f5f9" }}>Messages</span>
-                </div>
-                <div style={{ display:"flex", gap:"4px" }}>
-                  <button onClick={() => setIsChatMinimized(true)} style={{ width:"28px", height:"28px", borderRadius:"8px", border:"none", background:"rgba(255,255,255,.06)", color:"#64748b", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><Minimize2 className="w-3.5 h-3.5" /></button>
-                  <button onClick={() => setIsChatOpen(false)} style={{ width:"28px", height:"28px", borderRadius:"8px", border:"none", background:"rgba(255,255,255,.06)", color:"#64748b", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}><X className="w-3.5 h-3.5" /></button>
-                </div>
-              </div>
-              <div style={{ padding:"10px 16px", borderBottom:"1px solid rgba(255,255,255,.05)", background:"rgba(255,255,255,.02)" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:"6px", marginBottom:"8px" }}>
-                  <Users className="w-3.5 h-3.5" style={{ color:"#475569" }} />
-                  <span style={{ fontSize:"11px", fontWeight:"600", color:"#475569", textTransform:"uppercase", letterSpacing:".06em" }}>In Room</span>
-                  <span style={{ marginLeft:"auto", fontSize:"11px", fontWeight:"700", color:"#6366f1", background:"rgba(99,102,241,.15)", padding:"1px 8px", borderRadius:"10px", border:"1px solid rgba(99,102,241,.2)" }}>{users.length}</span>
-                </div>
-                <div style={{ display:"flex", flexWrap:"wrap", gap:"6px" }}>
-                  {users.map((u, i) => (
-                    <div key={u.clientId ?? i} style={{ display:"flex", alignItems:"center", gap:"6px", padding:"4px 10px", borderRadius:"8px", background:"rgba(255,255,255,.04)", border:"1px solid rgba(255,255,255,.07)" }}>
-                      <div style={{ width:"20px", height:"20px", borderRadius:"6px", background: u.color ?? "#6366f1", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", fontWeight:"700", color:"white" }}>{(u.role ?? "?").charAt(0).toUpperCase()}</div>
-                      <span style={{ fontSize:"12px", fontWeight:"500", color:"#94a3b8" }}>{u.role}{u.isLocal ? " (you)" : ""}</span>
-                      <div style={{ width:"5px", height:"5px", borderRadius:"50%", background:"#10b981", boxShadow:"0 0 4px #10b981" }} />
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div style={{ flex:1, overflowY:"auto", padding:"14px 16px", display:"flex", flexDirection:"column", gap:"10px" }}>
-                {messages.length === 0 && (
-                  <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:"8px", opacity:.4 }}>
-                    <MessageSquare className="w-8 h-8" style={{ color:"#475569" }} />
-                    <span style={{ fontSize:"12px", color:"#475569" }}>No messages yet</span>
-                  </div>
-                )}
-                {messages.map((m, i) => (
-                  <div key={i} style={{ display:"flex", justifyContent: m.sender===role ? "flex-end" : "flex-start" }}>
-                    <div style={{ maxWidth:"80%", padding:"8px 12px", borderRadius: m.sender===role ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.sender===role ? "linear-gradient(135deg,#6366f1,#4f46e5)" : "rgba(255,255,255,.06)", border: m.sender===role ? "none" : "1px solid rgba(255,255,255,.08)" }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:"6px", marginBottom:"3px" }}>
-                        <span style={{ fontSize:"11px", fontWeight:"600", color: m.sender===role ? "rgba(255,255,255,.7)" : "#6366f1" }}>{m.sender}</span>
-                        <span style={{ fontSize:"10px", color: m.sender===role ? "rgba(255,255,255,.4)" : "#475569" }}>{new Date(m.timestamp).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
-                      </div>
-                      <p style={{ fontSize:"13px", margin:0, color: m.sender===role ? "white" : "#e2e8f0", lineHeight:1.4 }}>{m.text}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding:"12px 14px", borderTop:"1px solid rgba(255,255,255,.06)", background:"rgba(255,255,255,.02)" }}>
-                <div style={{ display:"flex", gap:"8px" }}>
-                  <input value={msg} onChange={e => setMsg(e.target.value)} onKeyDown={handleKeyDown} placeholder="Send a message…" style={{ flex:1, padding:"9px 14px", borderRadius:"10px", background:"rgba(255,255,255,.05)", border:"1px solid rgba(255,255,255,.09)", color:"#e2e8f0", fontSize:"13px", outline:"none", fontFamily:"inherit" }} />
-                  <button onClick={handleSend} disabled={!msg.trim()} style={{ width:"38px", height:"38px", borderRadius:"10px", border:"none", background: msg.trim() ? "linear-gradient(135deg,#6366f1,#4f46e5)" : "rgba(255,255,255,.05)", color: msg.trim() ? "white" : "#475569", cursor: msg.trim() ? "pointer" : "not-allowed", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                    <Send className="w-4 h-4" />
-                  </button>
-                </div>
-                <div style={{ display:"flex", alignItems:"center", gap:"5px", marginTop:"8px" }}>
-                  <Lock className="w-3 h-3" style={{ color:"#10b981" }} />
-                  <span style={{ fontSize:"10px", color:"#475569" }}>End-to-end encrypted</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {/* ── Floating Chat — ChatPanel replaces the entire inline chat block ── */}
+      <ChatPanel
+        isOpen={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+        messages={messages}
+        users={users}
+        role={role}
+        onSend={sendEncryptedChat}
+      />
+
     </div>
   );
 }

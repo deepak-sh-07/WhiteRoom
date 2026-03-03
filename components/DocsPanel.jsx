@@ -15,7 +15,7 @@
  *   localColor   — hex colour of local user
  */
 
-import { useEffect, useRef, useCallback, memo, useState } from "react";
+import { useEffect, useRef, memo, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Collaboration from "@tiptap/extension-collaboration";
@@ -59,21 +59,47 @@ export const DocsPanel = memo(function DocsPanel({
   localName = "You",
   localColor = "#c9a84c",
 }) {
-  const isApplyingRef = useRef(false);
-  const fragmentRef   = useRef(null);
+  const fragmentRef    = useRef(null);
+  const undoManagerRef = useRef(null);
   const [wordCount, setWordCount] = useState(0);
+  const [canUndo, setCanUndo]     = useState(false);
+  const [canRedo, setCanRedo]     = useState(false);
 
   // Get (or create) the shared Yjs XML fragment for this doc
   if (!fragmentRef.current && ydocRef.current) {
     fragmentRef.current = ydocRef.current.getXmlFragment("tiptap-doc");
   }
 
+  // ── Y.UndoManager — Yjs-level undo/redo, works across peers ─────
+  useEffect(() => {
+    if (!fragmentRef.current) return;
+    const um = new Y.UndoManager(fragmentRef.current, { captureTimeout: 500 });
+    undoManagerRef.current = um;
+
+    const refresh = () => {
+      setCanUndo(um.canUndo());
+      setCanRedo(um.canRedo());
+    };
+
+    um.on("stack-item-added",  refresh);
+    um.on("stack-item-popped", refresh);
+    um.on("stack-cleared",     refresh);
+
+    return () => {
+      um.off("stack-item-added",  refresh);
+      um.off("stack-item-popped", refresh);
+      um.off("stack-cleared",     refresh);
+      um.destroy();
+      undoManagerRef.current = null;
+    };
+  }, []);
+
   // ── Editor setup ────────────────────────────────────────────────
   const editor = useEditor({
+    immediatelyRender: false,        // ← fixes SSR hydration mismatch
     extensions: [
       StarterKit.configure({
-        // Disable StarterKit's built-in history — Yjs handles undo/redo
-        history: false,
+        history: false,              // Y.UndoManager handles history
       }),
       Collaboration.configure({
         document: ydocRef.current,
@@ -87,32 +113,18 @@ export const DocsPanel = memo(function DocsPanel({
       },
     },
     onUpdate: ({ editor }) => {
-      // Word count
       const text = editor.getText();
       setWordCount(text.trim() === "" ? 0 : text.trim().split(/\s+/).length);
-
-      // Broadcast the Yjs update — Collaboration extension writes to ydoc,
-      // the ydoc "update" listener in page.jsx will pick it up and broadcast
-      // automatically, so we don't need to do anything extra here.
     },
-  }, []);  // empty deps — editor is stable, Yjs handles all sync
+  }, []);
 
-  // ── Apply incoming Yjs updates from remote peers ──────────────
-  //    page.jsx receives "yjs-update" → decrypts → calls Y.applyUpdate(ydoc, ...)
-  //    The Collaboration extension listens to ydoc internally and updates the editor.
-  //    Nothing extra needed here — Yjs + TipTap wire themselves together.
-
-  // ── Expose a no-op _docsApply so page.jsx won't error if it tries ─
+  // ── Expose ready flag so page.jsx knows doc is mounted ──────────
   useEffect(() => {
-    if (ydocRef.current) {
-      ydocRef.current._docsReady = true;
-    }
-    return () => {
-      if (ydocRef.current) delete ydocRef.current._docsReady;
-    };
+    if (ydocRef.current) ydocRef.current._docsReady = true;
+    return () => { if (ydocRef.current) delete ydocRef.current._docsReady; };
   }, [ydocRef]);
 
-  // ── Cleanup editor on unmount ─────────────────────────────────
+  // ── Cleanup editor on unmount ────────────────────────────────────
   useEffect(() => {
     return () => { editor?.destroy(); };
   }, [editor]);
@@ -134,9 +146,10 @@ export const DocsPanel = memo(function DocsPanel({
         padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)",
         background: "#121110", flexShrink: 0, flexWrap: "wrap",
       }}>
+
         {/* Text style */}
         <ToolBtn title="Bold (Ctrl+B)" active={editor.isActive("bold")} onClick={() => editor.chain().focus().toggleBold().run()}>B</ToolBtn>
-        <ToolBtn title="Italic (Ctrl+I)" active={editor.isActive("italic")} onClick={() => editor.chain().focus().toggleItalic().run()} >
+        <ToolBtn title="Italic (Ctrl+I)" active={editor.isActive("italic")} onClick={() => editor.chain().focus().toggleItalic().run()}>
           <span style={{ fontStyle: "italic" }}>I</span>
         </ToolBtn>
         <ToolBtn title="Strikethrough" active={editor.isActive("strike")} onClick={() => editor.chain().focus().toggleStrike().run()}>
@@ -156,29 +169,28 @@ export const DocsPanel = memo(function DocsPanel({
         <ToolDivider />
 
         {/* Lists */}
-        <ToolBtn title="Bullet list" active={editor.isActive("bulletList")} onClick={() => editor.chain().focus().toggleBulletList().run()}>
-          ≡
-        </ToolBtn>
-        <ToolBtn title="Ordered list" active={editor.isActive("orderedList")} onClick={() => editor.chain().focus().toggleOrderedList().run()}>
-          1.
-        </ToolBtn>
-        <ToolBtn title="Blockquote" active={editor.isActive("blockquote")} onClick={() => editor.chain().focus().toggleBlockquote().run()}>
-          "
-        </ToolBtn>
-        <ToolBtn title="Code block" active={editor.isActive("codeBlock")} onClick={() => editor.chain().focus().toggleCodeBlock().run()}>
-          {"{ }"}
-        </ToolBtn>
+        <ToolBtn title="Bullet list" active={editor.isActive("bulletList")} onClick={() => editor.chain().focus().toggleBulletList().run()}>≡</ToolBtn>
+        <ToolBtn title="Ordered list" active={editor.isActive("orderedList")} onClick={() => editor.chain().focus().toggleOrderedList().run()}>1.</ToolBtn>
+        <ToolBtn title="Blockquote" active={editor.isActive("blockquote")} onClick={() => editor.chain().focus().toggleBlockquote().run()}>"</ToolBtn>
+        <ToolBtn title="Code block" active={editor.isActive("codeBlock")} onClick={() => editor.chain().focus().toggleCodeBlock().run()}>{"{ }"}</ToolBtn>
 
         <ToolDivider />
 
-        {/* History */}
-        <ToolBtn title="Undo (Ctrl+Z)" disabled={!editor.can().undo()} onClick={() => editor.chain().focus().undo().run()}>↩</ToolBtn>
-        <ToolBtn title="Redo (Ctrl+Shift+Z)" disabled={!editor.can().redo()} onClick={() => editor.chain().focus().redo().run()}>↪</ToolBtn>
+        {/* Undo / Redo — Y.UndoManager, NOT TipTap history */}
+        <ToolBtn
+          title="Undo (Ctrl+Z)"
+          disabled={!canUndo}
+          onClick={() => undoManagerRef.current?.undo()}
+        >↩</ToolBtn>
+        <ToolBtn
+          title="Redo (Ctrl+Shift+Z)"
+          disabled={!canRedo}
+          onClick={() => undoManagerRef.current?.redo()}
+        >↪</ToolBtn>
 
         {/* Spacer + presence avatars + word count */}
         <div style={{ flex: 1 }} />
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          {/* Active user avatars */}
           {activeUsers.slice(0, 5).map((u, i) => (
             <div key={u.clientId ?? i} title={u.name ?? u.role} style={{
               width: "22px", height: "22px", borderRadius: "6px",
@@ -212,6 +224,8 @@ export const DocsPanel = memo(function DocsPanel({
     </div>
   );
 });
+
+export default DocsPanel;
 
 // ── Editor prose styles ──────────────────────────────────────────
 const EDITOR_CSS = `
@@ -286,7 +300,6 @@ const EDITOR_CSS = `
   .wr-doc-editor hr {
     border: none; border-top: 1px solid rgba(255,255,255,0.07); margin: 2em 0;
   }
-  /* Yjs collaboration cursor */
   .collaboration-cursor__caret {
     border-left: 2px solid; border-right: 2px solid;
     margin-left: -1px; margin-right: -1px;
