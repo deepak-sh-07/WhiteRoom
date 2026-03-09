@@ -6,8 +6,8 @@ import { useParams } from "next/navigation";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import dynamic from "next/dynamic";
-import { motion } from "framer-motion";
-import { Lock, Shield, MessageSquare } from 'lucide-react';
+import { motion, AnimatePresence } from "framer-motion";
+import { Lock, Shield, MessageSquare, Users } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
 
@@ -17,6 +17,7 @@ import ViewSwitcher  from "@/components/ViewSwitcher";
 import VideoTile     from "@/components/VideoTile";
 import ControlBar    from "@/components/ControlBar";
 import ChatPanel     from "@/components/ChatPanel";
+import PresenceSidebar from "@/components/PresenceSidebar";
 
 export default function Room() {
   const { roomId } = useParams();
@@ -29,7 +30,9 @@ export default function Room() {
   const [messages, setMessages]         = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
   const [allPeerIds, setAllPeerIds]     = useState([]);
-  const [isChatOpen, setIsChatOpen]     = useState(true);
+  const [isChatOpen, setIsChatOpen]       = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [peerStates, setPeerStates]       = useState({}); // peerId → connectionState
   const [isMicOn, setIsMicOn]           = useState(true);
   const [isCameraOn, setIsCameraOn]     = useState(true);
   const [view, setView] = useState("video"); // "video" | "whiteboard" | "docs"
@@ -103,8 +106,14 @@ export default function Room() {
       if (candidate) socket.emit("ice-candidate", { roomId: roomIdRef.current, candidate, targetId: peerId });
     };
 
-    pc.oniceconnectionstatechange = () => console.log(`[pc:${peerId}] ICE: ${pc.iceConnectionState}`);
-    pc.onconnectionstatechange    = () => console.log(`[pc:${peerId}] PC:  ${pc.connectionState}`);
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[pc:${peerId}] ICE: ${pc.iceConnectionState}`);
+      setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
+    };
+    pc.onconnectionstatechange = () => {
+      console.log(`[pc:${peerId}] PC:  ${pc.connectionState}`);
+      setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
+    };
 
     pc.ondatachannel = ({ channel }) => {
       dcsRef.current[peerId] = channel;
@@ -129,13 +138,34 @@ export default function Room() {
     };
     channel.onmessage = e => onDcMessage(e.data, peerId);
     channel.onclose   = () => console.warn(`[dc:${peerId}] closed`);
-    channel.onerror   = e => console.error(`[dc:${peerId}] error`, e);
+    channel.onerror   = e => {
+      // RTCDataChannel errors often come with empty event objects — extract what we can
+      const msg = e?.message ?? e?.error?.message ?? "unknown";
+      const state = dcsRef.current[peerId]?.readyState ?? "n/a";
+      console.warn(`[dc:${peerId}] error — readyState: ${state}, msg: ${msg}`);
+    };
   };
+
+  const DC_MAX_BYTES = 200_000; // stay well under the 256KB SCTP limit
 
   const sendTo = (peerId, type, payload) => {
     const ch = dcsRef.current[peerId];
     if (!ch || ch.readyState !== "open") return;
-    ch.send(JSON.stringify({ type, payload, ts: Date.now() }));
+    try {
+      const raw = JSON.stringify({ type, payload, ts: Date.now() });
+      if (raw.length > DC_MAX_BYTES) {
+        console.warn(`[dc:${peerId}] message too large (${raw.length} bytes), type=${type} — dropping`);
+        return;
+      }
+      // Back-pressure: drop if send buffer is filling up
+      if (ch.bufferedAmount > DC_MAX_BYTES) {
+        console.warn(`[dc:${peerId}] buffer full (${ch.bufferedAmount}), dropping type=${type}`);
+        return;
+      }
+      ch.send(raw);
+    } catch (err) {
+      console.warn(`[dc:${peerId}] send failed (${type}):`, err?.message ?? err);
+    }
   };
 
   const broadcast = (type, payload) => Object.keys(dcsRef.current).forEach(id => sendTo(id, type, payload));
@@ -178,6 +208,14 @@ export default function Room() {
           const raw = await decryptWithPrivateKey(rsaKeysRef.current[peerId].privateKey, msg.payload.key);
           roomKeysRef.current[peerId] = await importKey(raw);
           broadcastAwareness();
+          // Send full Yjs state so late joiners get current doc
+          if (ydocRef.current) {
+            const fullState = Y.encodeStateAsUpdate(ydocRef.current);
+            const k = roomKeysRef.current[peerId];
+            if (k && fullState.length > 0) {
+              sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
+            }
+          }
         }
         break;
       }
@@ -188,6 +226,9 @@ export default function Room() {
         setUsers(Array.from(awarenessRef.current.states.entries()).map(([id, s]) => ({
           clientId: id, role: s.user?.role ?? "?", name: s.user?.name ?? "?",
           color: s.user?.color ?? "#a78bfa", isLocal: id === ydocRef.current?.clientID,
+          canvasCursor: s.cursor ?? null,
+          docCursor: s.docCursor ?? null,
+          lastActive: s.lastActive ?? null,
         })));
         break;
       }
@@ -215,6 +256,7 @@ export default function Room() {
     const awareness = new Awareness(ydoc);
     awarenessRef.current = awareness;
     awareness.setLocalState({ user: { role: "connecting", name: "connecting" }, cursor: null });
+    ydoc._awareness = awareness; // expose so DocsPanel can broadcast docCursor
     setUsers([{ clientId: ydoc.clientID, role: "connecting", name: "connecting", color: "#a78bfa", isLocal: true }]);
     ydoc.on("update", async (update, origin) => {
       if (origin === "remote") return;
@@ -317,6 +359,7 @@ export default function Room() {
       delete roomKeysRef.current[peerId];
       setRemoteStreams(p => { const n = { ...p }; delete n[peerId]; return n; });
       setAllPeerIds(p => p.filter(id => id !== peerId));
+      setPeerStates(p => { const n = { ...p }; delete n[peerId]; return n; });
     };
 
     const onRole = ({ role }) => {
@@ -394,6 +437,26 @@ export default function Room() {
   const toggleCamera  = () => { localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !isCameraOn; }); setIsCameraOn(v => !v); };
   const sendWbMsg     = useCallback((type, payload) => broadcast(type, payload), []);
 
+  const handleCursorMove = useCallback((x, y) => {
+    if (!awarenessRef.current) return;
+    const cur = awarenessRef.current.getLocalState() ?? {};
+    awarenessRef.current.setLocalState({ ...cur, cursor: { x, y } });
+    broadcastAwareness();
+  }, []);
+
+  // ── Broadcast lastActive timestamp every 30s ─────────────────────
+  useEffect(() => {
+    const tick = () => {
+      if (!awarenessRef.current) return;
+      const cur = awarenessRef.current.getLocalState() ?? {};
+      awarenessRef.current.setLocalState({ ...cur, lastActive: Date.now() });
+      broadcastAwareness();
+    };
+    tick(); // immediately on mount
+    const interval = setInterval(tick, 30_000);
+    return () => clearInterval(interval);
+  }, []);
+
   // ── Grid layout ──
   const totalTiles = 1 + allPeerIds.length;
   const cols = totalTiles === 1 ? 1 : totalTiles <= 4 ? 2 : 3;
@@ -454,51 +517,111 @@ export default function Room() {
               <MessageSquare className="w-3.5 h-3.5" />
               {isChatOpen ? "Hide Chat" : "Chat"}
             </button>
+
+            {/* Presence sidebar toggle */}
+            <button
+              onClick={() => setIsSidebarOpen(v => !v)}
+              className="flex items-center gap-1.5 cursor-pointer"
+              style={{ padding: "7px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,.08)", background: isSidebarOpen ? "rgba(16,185,129,.12)" : "rgba(255,255,255,.04)", color: isSidebarOpen ? "#10b981" : "#64748b", fontSize: "12px", fontWeight: "600" }}
+            >
+              <Users className="w-3.5 h-3.5" />
+              {users.length} online
+            </button>
           </div>
         </motion.header>
+
+        {/* ── Main + Sidebar ── */}
+        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
         {/* ── Main ── */}
         <div className="flex-1 relative overflow-hidden"
              style={{ background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)" }}>
 
           {/* Video grid */}
-          <div style={{ position: "absolute", inset: 0, padding: "10px", display: view === "video" ? "grid" : "none", gap: "10px", gridTemplateColumns: `repeat(${cols},1fr)`, gridTemplateRows: `repeat(${rows},1fr)` }}>
-
-            {/* Local tile — VideoTile handles camera-off state + label + status dot */}
-            <VideoTile
-              videoRef={localVideoRef}
-              isLocal
-              isCameraOn={isCameraOn}
-              label={`You · ${role}`}
-              variant="local"
-            />
-
-            {/* Remote tiles */}
-            {allPeerIds.map((peerId, idx) => (
-              <VideoTile
-                key={peerId}
-                stream={remoteStreams[peerId]}
-                label={`Peer ${idx + 1}`}
-                variant="remote"
-              />
-            ))}
-          </div>
+          <AnimatePresence mode="wait">
+            {view === "video" && (
+              <motion.div
+                key="video"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                style={{ position: "absolute", inset: 0, padding: "10px", display: "grid", gap: "10px", gridTemplateColumns: `repeat(${cols},1fr)`, gridTemplateRows: `repeat(${rows},1fr)` }}
+              >
+                <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" />
+                {allPeerIds.map((peerId, idx) => (
+                  <motion.div
+                    key={peerId}
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <VideoTile stream={remoteStreams[peerId]} label={`Peer ${idx + 1}`} variant="remote" />
+                  </motion.div>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Whiteboard */}
-          <div style={{ position: "absolute", inset: 0, zIndex: 2, display: view === "whiteboard" ? "block" : "none" }}>
-            <WhiteboardPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} />
-          </div>
+          <AnimatePresence mode="wait">
+            {view === "whiteboard" && (
+              <motion.div
+                key="whiteboard"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                style={{ position: "absolute", inset: 0, zIndex: 2 }}
+              >
+                <WhiteboardPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} onCursorMove={handleCursorMove} />
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Docs */}
-          <div style={{ position: "absolute", inset: 0, zIndex: 2, display: view === "docs" ? "block" : "none" }}>
-            <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users}
-              localName={users.find(u => u.isLocal)?.name ?? "You"}
-              localColor={users.find(u => u.isLocal)?.color ?? "#c9a84c"} />
-          </div>
+          <AnimatePresence mode="wait">
+            {view === "docs" && (
+              <motion.div
+                key="docs"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                style={{ position: "absolute", inset: 0, zIndex: 2 }}
+              >
+                <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users}
+                  localName={users.find(u => u.isLocal)?.name ?? "You"}
+                  localColor={users.find(u => u.isLocal)?.color ?? "#c9a84c"}
+                  roomCode={roomId} />
+              </motion.div>
+            )}
+          </AnimatePresence>
 
-        </div>
+        </div>{/* end main */}
 
-        {/* ── Footer — ControlBar replaces the three inline buttons ── */}
+          {/* ── Presence Sidebar ── */}
+          <AnimatePresence>
+            {isSidebarOpen && (
+              <motion.div
+                key="sidebar"
+                initial={{ width: 0, opacity: 0 }}
+                animate={{ width: 224, opacity: 1 }}
+                exit={{ width: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeInOut" }}
+                style={{ overflow: "hidden", flexShrink: 0 }}
+              >
+                <PresenceSidebar
+                  users={users}
+                  peerStates={peerStates}
+                  onClose={() => setIsSidebarOpen(false)}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+        </div>{/* end main + sidebar flex row */}
         <motion.div
           initial={{ y: 16, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}

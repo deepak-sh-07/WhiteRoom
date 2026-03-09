@@ -20,6 +20,8 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
   const storeRef            = useRef(null);
   const isApplyingRemoteRef = useRef(false);
   const editorRef           = useRef(null);
+  const lastCursorRef       = useRef({ x: 0, y: 0 });
+  const rafRef              = useRef(null);
 
   // ── 1. Create store once ─────────────────────────────────────────
   if (!storeRef.current) {
@@ -38,8 +40,6 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
         const diff = {
           added:   Object.values(changes.added   ?? {}),
           updated: Object.values(changes.updated ?? {}).map(([, next]) => next),
-          // Send the full removed record objects so the receiver can
-          // identify them reliably regardless of tldraw version quirks
           removed: Object.values(changes.removed ?? {}),
         };
 
@@ -69,10 +69,6 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
         if (toPut.length) store.put(toPut);
 
         if (diff.removed?.length) {
-          // tldraw store.remove() accepts either:
-          //   - an array of record objects (with .id property)
-          //   - an array of id strings
-          // We send full record objects now, but guard both formats for safety.
           const toRemove = diff.removed.map(r =>
             typeof r === "string" ? r : r.id
           );
@@ -95,7 +91,25 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
     };
   }, [applyRemoteUpdate, ydocRef]);
 
-  // ── 5. Render ────────────────────────────────────────────────────
+
+
+  useEffect(() => {
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, []);
+
+  // ── 6. Convert remote canvas coords → screen coords for overlay ──
+  //    Called per-render so cursors stay correct when camera pans/zooms.
+  const toScreen = useCallback((canvasX, canvasY) => {
+    const editor = editorRef.current;
+    if (!editor) return { x: canvasX, y: canvasY };
+    try {
+      return editor.pageToScreen({ x: canvasX, y: canvasY });
+    } catch {
+      return { x: canvasX, y: canvasY };
+    }
+  }, []);
+
+  // ── 7. Render ────────────────────────────────────────────────────
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
       <style>{TLDRAW_DARK_CSS}</style>
@@ -106,64 +120,73 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
           editorRef.current = editor;
           editor.user.updateUserPreferences({ colorScheme: "dark" });
 
-          // Broadcast cursor position via presence store listener
-          editor.store.listen(({ changes }) => {
-            const entries = Object.values(changes.updated ?? {});
-            for (const [, next] of entries) {
-              if (
-                next?.typeName === "instance_presence" &&
-                next?.userId === editor.user.getId()
-              ) {
-                if (next?.cursor && onCursorMove) {
-                  onCursorMove(next.cursor.x, next.cursor.y);
+          // Track cursor in canvas space via tldraw's pointer events
+          // This runs inside tldraw's own event loop — no perf impact on strokes
+          editor.on("event", (e) => {
+            if (!onCursorMove) return;
+            if (e.type !== "pointer" && e.type !== "move") return;
+
+            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+            rafRef.current = requestAnimationFrame(() => {
+              try {
+                const { x, y } = editor.inputs.currentPagePoint;
+                const rx = Math.round(x);
+                const ry = Math.round(y);
+                const last = lastCursorRef.current;
+                if (Math.abs(rx - last.x) > 3 || Math.abs(ry - last.y) > 3) {
+                  lastCursorRef.current = { x: rx, y: ry };
+                  onCursorMove(rx, ry);
                 }
-                break;
-              }
-            }
-          }, { source: "user", scope: "presence" });
+              } catch {}
+            });
+          });
         }}
       />
 
-      {/* Remote peer cursors overlay */}
+      {/* Remote peer cursors overlay — converted to screen space */}
       <div style={{ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 10 }}>
         {users
           .filter(u => !u.isLocal && u.canvasCursor)
-          .map(u => (
-            <div
-              key={u.clientId}
-              style={{
-                position: "absolute",
-                left: u.canvasCursor.x,
-                top:  u.canvasCursor.y,
-                transition: "left 75ms linear, top 75ms linear",
-                willChange: "left, top",
-              }}
-            >
-              <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
-                <path
-                  d="M4 2l12 7-6.5 1.5L8 17z"
-                  fill={u.color ?? "#c9a84c"}
-                  stroke="white"
-                  strokeWidth="1.5"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span style={{
-                position: "absolute",
-                top: "18px", left: "14px",
-                fontSize: "10px", fontWeight: "700",
-                fontFamily: "'DM Mono', monospace",
-                letterSpacing: "0.04em",
-                padding: "2px 7px", borderRadius: "4px",
-                whiteSpace: "nowrap",
-                color: "#0c0b09",
-                background: u.color ?? "#c9a84c",
-                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-              }}>
-                {u.name && u.name !== "?" ? u.name : u.role}
-              </span>
-            </div>
-          ))}
+          .map(u => {
+            const screen = toScreen(u.canvasCursor.x, u.canvasCursor.y);
+            return (
+              <div
+                key={u.clientId}
+                style={{
+                  position: "absolute",
+                  left: screen.x,
+                  top:  screen.y,
+                  transition: "left 60ms linear, top 60ms linear",
+                  willChange: "left, top",
+                  pointerEvents: "none",
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                  <path
+                    d="M4 2l12 7-6.5 1.5L8 17z"
+                    fill={u.color ?? "#c9a84c"}
+                    stroke="white"
+                    strokeWidth="1.5"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <span style={{
+                  position: "absolute",
+                  top: "18px", left: "14px",
+                  fontSize: "10px", fontWeight: "700",
+                  fontFamily: "'DM Mono', monospace",
+                  letterSpacing: "0.04em",
+                  padding: "2px 7px", borderRadius: "4px",
+                  whiteSpace: "nowrap",
+                  color: "#0c0b09",
+                  background: u.color ?? "#c9a84c",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                }}>
+                  {u.name && u.name !== "?" ? u.name : u.role}
+                </span>
+              </div>
+            );
+          })}
       </div>
     </div>
   );

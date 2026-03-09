@@ -12,37 +12,39 @@ model User {
   id            Int        @id @default(autoincrement())
   email         String     @unique
   password      String
-  // rooms this user CREATED (ownership)
   createdRooms  Room[]     @relation("CreatedRooms")
-
-  // rooms this user is a MEMBER of
   roomUsers     RoomUser[]
 }
 
 model Room {
   id            Int        @id @default(autoincrement())
   name          String
-  room_code     String       @unique
-  // ownership
+  room_code     String     @unique
   createdById   Int
   createdBy     User       @relation("CreatedRooms", fields: [createdById], references: [id])
-
-  // membership
   roomUsers     RoomUser[]
+  snapshots     Snapshot[]
 }
 
 model RoomUser {
-  id        Int   @id @default(autoincrement())
+  id        Int        @id @default(autoincrement())
   userId    Int
   roomId    Int
-
   role      RoomRole   @default(PEER)
   status    RoomStatus @default(PENDING)
-
-  user      User @relation(fields: [userId], references: [id])
-  room      Room @relation(fields: [roomId], references: [id])
+  user      User       @relation(fields: [userId], references: [id])
+  room      Room       @relation(fields: [roomId], references: [id])
 
   @@unique([userId, roomId])
+}
+
+model Snapshot {
+  id        Int      @id @default(autoincrement())
+  roomId    Int
+  room      Room     @relation(fields: [roomId], references: [id])
+  label     String
+  state     String   // base64-encoded Yjs state update
+  createdAt DateTime @default(now())
 }
 
 enum RoomRole {
@@ -57,4 +59,3 @@ enum RoomStatus {
   LEFT
   KICKED
 }
-
