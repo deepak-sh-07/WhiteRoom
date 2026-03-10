@@ -10,6 +10,54 @@ const TLDRAW_DARK_CSS = `
   .tl-grid { --tl-grid-color: rgba(255,255,255,0.04) !important; }
 `;
 
+// ── Cursor overlay — memoized separately so it never causes tldraw to re-render
+const CursorOverlay = memo(function CursorOverlay({ users, editorRef }) {
+  const toScreen = (canvasX, canvasY) => {
+    const editor = editorRef.current;
+    if (!editor) return { x: canvasX, y: canvasY };
+    try { return editor.pageToScreen({ x: canvasX, y: canvasY }); }
+    catch { return { x: canvasX, y: canvasY }; }
+  };
+
+  return (
+    <div style={{ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 10 }}>
+      {users
+        .filter(u => !u.isLocal && u.canvasCursor)
+        .map(u => {
+          const screen = toScreen(u.canvasCursor.x, u.canvasCursor.y);
+          return (
+            <div
+              key={u.clientId}
+              style={{
+                position: "absolute",
+                left: screen.x, top: screen.y,
+                transition: "left 80ms linear, top 80ms linear",
+                willChange: "left, top",
+                pointerEvents: "none",
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+                <path d="M4 2l12 7-6.5 1.5L8 17z"
+                  fill={u.color ?? "#c9a84c"} stroke="white"
+                  strokeWidth="1.5" strokeLinejoin="round" />
+              </svg>
+              <span style={{
+                position: "absolute", top: "18px", left: "14px",
+                fontSize: "10px", fontWeight: "700",
+                fontFamily: "'DM Mono', monospace", letterSpacing: "0.04em",
+                padding: "2px 7px", borderRadius: "4px", whiteSpace: "nowrap",
+                color: "#0c0b09", background: u.color ?? "#c9a84c",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+              }}>
+                {u.name && u.name !== "?" ? u.name : u.role}
+              </span>
+            </div>
+          );
+        })}
+    </div>
+  );
+});
+
 export const WhiteboardPanel = memo(function WhiteboardPanel({
   ydocRef,
   sendMessage,
@@ -97,18 +145,6 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
   }, []);
 
-  // ── 6. Convert remote canvas coords → screen coords for overlay ──
-  //    Called per-render so cursors stay correct when camera pans/zooms.
-  const toScreen = useCallback((canvasX, canvasY) => {
-    const editor = editorRef.current;
-    if (!editor) return { x: canvasX, y: canvasY };
-    try {
-      return editor.pageToScreen({ x: canvasX, y: canvasY });
-    } catch {
-      return { x: canvasX, y: canvasY };
-    }
-  }, []);
-
   // ── 7. Render ────────────────────────────────────────────────────
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -121,10 +157,15 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
           editor.user.updateUserPreferences({ colorScheme: "dark" });
 
           // Track cursor in canvas space via tldraw's pointer events
-          // This runs inside tldraw's own event loop — no perf impact on strokes
+          // Skip broadcasting while actively drawing — strokes take priority
           editor.on("event", (e) => {
             if (!onCursorMove) return;
             if (e.type !== "pointer" && e.type !== "move") return;
+
+            // Don't broadcast cursor position while user is drawing
+            const state = editor.getEditingShapeId?.() ?? null;
+            const isDrawing = editor.inputs.isPointerDown;
+            if (isDrawing) return;
 
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             rafRef.current = requestAnimationFrame(() => {
@@ -133,7 +174,8 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
                 const rx = Math.round(x);
                 const ry = Math.round(y);
                 const last = lastCursorRef.current;
-                if (Math.abs(rx - last.x) > 3 || Math.abs(ry - last.y) > 3) {
+                // Increased threshold from 3 to 8px — fewer updates while moving
+                if (Math.abs(rx - last.x) > 8 || Math.abs(ry - last.y) > 8) {
                   lastCursorRef.current = { x: rx, y: ry };
                   onCursorMove(rx, ry);
                 }
@@ -143,51 +185,8 @@ export const WhiteboardPanel = memo(function WhiteboardPanel({
         }}
       />
 
-      {/* Remote peer cursors overlay — converted to screen space */}
-      <div style={{ pointerEvents: "none", position: "absolute", inset: 0, zIndex: 10 }}>
-        {users
-          .filter(u => !u.isLocal && u.canvasCursor)
-          .map(u => {
-            const screen = toScreen(u.canvasCursor.x, u.canvasCursor.y);
-            return (
-              <div
-                key={u.clientId}
-                style={{
-                  position: "absolute",
-                  left: screen.x,
-                  top:  screen.y,
-                  transition: "left 60ms linear, top 60ms linear",
-                  willChange: "left, top",
-                  pointerEvents: "none",
-                }}
-              >
-                <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
-                  <path
-                    d="M4 2l12 7-6.5 1.5L8 17z"
-                    fill={u.color ?? "#c9a84c"}
-                    stroke="white"
-                    strokeWidth="1.5"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <span style={{
-                  position: "absolute",
-                  top: "18px", left: "14px",
-                  fontSize: "10px", fontWeight: "700",
-                  fontFamily: "'DM Mono', monospace",
-                  letterSpacing: "0.04em",
-                  padding: "2px 7px", borderRadius: "4px",
-                  whiteSpace: "nowrap",
-                  color: "#0c0b09",
-                  background: u.color ?? "#c9a84c",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-                }}>
-                  {u.name && u.name !== "?" ? u.name : u.role}
-                </span>
-              </div>
-            );
-          })}
-      </div>
+      {/* Remote cursors — memoized, never causes tldraw re-render */}
+      <CursorOverlay users={users} editorRef={editorRef} />
     </div>
   );
 });

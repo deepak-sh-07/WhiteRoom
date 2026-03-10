@@ -5,6 +5,7 @@ import { socket } from "@/lib/socket";
 import { useParams } from "next/navigation";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
+import { IndexeddbPersistence } from "y-indexeddb";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { Lock, Shield, MessageSquare, Users } from 'lucide-react';
@@ -248,16 +249,34 @@ export default function Room() {
   };
 
   // ══════════════════════════════════════════
-  //  YJS
+  //  YJS + INDEXEDDB PERSISTENCE
   // ══════════════════════════════════════════
+  const idbRef = useRef(null);
+
   useEffect(() => {
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
+
+    // ── IndexedDB persistence ─────────────────────────────────────
+    // Key is per-room so each room has its own local store.
+    // `synced` fires once the local DB state is loaded into the doc —
+    // only after that do we broadcast to peers so we send the full
+    // merged state (local offline edits + whatever peers have).
+    const idb = new IndexeddbPersistence(`whiteroom:${roomId}`, ydoc);
+    idbRef.current = idb;
+
+    idb.on("synced", () => {
+      console.log("[idb] local state loaded from IndexedDB");
+      // Re-broadcast awareness now that local doc is hydrated
+      broadcastAwareness();
+    });
+
     const awareness = new Awareness(ydoc);
     awarenessRef.current = awareness;
     awareness.setLocalState({ user: { role: "connecting", name: "connecting" }, cursor: null });
-    ydoc._awareness = awareness; // expose so DocsPanel can broadcast docCursor
+    ydoc._awareness = awareness;
     setUsers([{ clientId: ydoc.clientID, role: "connecting", name: "connecting", color: "#a78bfa", isLocal: true }]);
+
     ydoc.on("update", async (update, origin) => {
       if (origin === "remote") return;
       for (const id of Object.keys(dcsRef.current)) {
@@ -265,7 +284,12 @@ export default function Room() {
         if (k) sendTo(id, "yjs-update", await encrypt(k, Array.from(update)));
       }
     });
-    return () => { awareness.destroy(); ydoc.destroy(); };
+
+    return () => {
+      awareness.destroy();
+      idb.destroy();
+      ydoc.destroy();
+    };
   }, []);
 
   // ══════════════════════════════════════════
@@ -378,7 +402,24 @@ export default function Room() {
       socket.emit("join-room", roomId);
     };
 
+    // On reconnect: re-broadcast local Yjs state to all open peers
+    // so any offline edits made while disconnected get merged in
+    const onReconnect = async () => {
+      console.log("[signaling] reconnected — re-syncing Yjs state to peers");
+      if (!ydocRef.current) return;
+      const fullState = Y.encodeStateAsUpdate(ydocRef.current);
+      for (const id of Object.keys(dcsRef.current)) {
+        const k = roomKeysRef.current[id];
+        if (k && fullState.length > 0) {
+          sendTo(id, "yjs-update", await encrypt(k, Array.from(fullState)));
+        }
+      }
+      broadcastAwareness();
+    };
+
     socket.on("connect",       onConnect);
+    socket.on("reconnect",     onReconnect);
+    socket.on("disconnect",    () => { setConnected(false); console.warn("[signaling] disconnected"); });
     socket.on("role",          onRole);
     socket.on("room-peers",    onRoomPeers);
     socket.on("peer-joined",   onPeerJoined);
@@ -396,6 +437,8 @@ export default function Room() {
 
     return () => {
       socket.off("connect",       onConnect);
+      socket.off("reconnect",     onReconnect);
+      socket.off("disconnect");
       socket.off("role",          onRole);
       socket.off("room-peers",    onRoomPeers);
       socket.off("peer-joined",   onPeerJoined);
@@ -437,11 +480,23 @@ export default function Room() {
   const toggleCamera  = () => { localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !isCameraOn; }); setIsCameraOn(v => !v); };
   const sendWbMsg     = useCallback((type, payload) => broadcast(type, payload), []);
 
+  // ── Cursor broadcast — throttled to 20fps, never during active stroke ──
+  const cursorThrottleRef = useRef(null);
+  const pendingCursorRef  = useRef(null);
+
   const handleCursorMove = useCallback((x, y) => {
     if (!awarenessRef.current) return;
-    const cur = awarenessRef.current.getLocalState() ?? {};
-    awarenessRef.current.setLocalState({ ...cur, cursor: { x, y } });
-    broadcastAwareness();
+    pendingCursorRef.current = { x, y };
+
+    if (cursorThrottleRef.current) return; // already scheduled
+    cursorThrottleRef.current = setTimeout(() => {
+      cursorThrottleRef.current = null;
+      const pos = pendingCursorRef.current;
+      if (!pos || !awarenessRef.current) return;
+      const cur = awarenessRef.current.getLocalState() ?? {};
+      awarenessRef.current.setLocalState({ ...cur, cursor: pos });
+      broadcastAwareness();
+    }, 50); // 50ms = max 20fps for cursor updates
   }, []);
 
   // ── Broadcast lastActive timestamp every 30s ─────────────────────
@@ -472,6 +527,30 @@ export default function Room() {
       {/* Background glow */}
       <div className="fixed inset-0 pointer-events-none z-0"
            style={{ background: "radial-gradient(ellipse 80% 50% at 20% 20%,rgba(99,102,241,.07),transparent 60%),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(20,184,166,.06),transparent 60%)" }} />
+
+      {/* Offline banner */}
+      <AnimatePresence>
+        {!connected && (
+          <motion.div
+            key="offline-banner"
+            initial={{ y: -40, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -40, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            style={{
+              position: "fixed", top: 0, left: 0, right: 0, zIndex: 100,
+              background: "rgba(234,179,8,.12)", backdropFilter: "blur(12px)",
+              borderBottom: "1px solid rgba(234,179,8,.3)",
+              padding: "8px 20px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+            }}
+          >
+            <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: "#eab308", boxShadow: "0 0 6px #eab308" }} />
+            <span style={{ fontSize: "12px", fontWeight: "600", color: "#eab308" }}>
+              You're offline — edits are saved locally and will sync when you reconnect
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="relative z-10 flex flex-col h-full" style={{ padding: "12px" }}>
 

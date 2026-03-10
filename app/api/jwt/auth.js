@@ -2,33 +2,31 @@ import jwt from "jsonwebtoken";
 import { NextResponse } from "next/server";
 import { access_key } from "./jwt";
 
+const isPage = (req) => !req.nextUrl.pathname.startsWith("/api");
+
 export function auth(req) {
-  console.log("Auth working")
-  const accessToken = req.cookies.get("accessToken")?.value;
+  const unauthorized = () => isPage(req)
+    ? NextResponse.redirect(new URL("/login", req.url))
+    : NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+
+  const accessToken  = req.cookies.get("accessToken")?.value;
   const refreshToken = req.cookies.get("refreshToken")?.value;
 
-  if (!accessToken && !refreshToken) {
-    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
-  }
+  if (!accessToken && !refreshToken) return unauthorized();
 
-  
   if (accessToken) {
     try {
       const payload = jwt.verify(accessToken, process.env.JWT_ACCESS_KEY);
-
       const headers = new Headers(req.headers);
       headers.set("x-user-id", payload.userId);
-      console.log("1" , payload.userId)
-      return NextResponse.next({
-        request: { headers },
-      });
-    } catch {}
+      return NextResponse.next({ request: { headers } });
+    } catch (err) {
+      if (err.name !== "TokenExpiredError") return unauthorized();
+      // expired → fall through to refresh
+    }
   }
 
-  // 2️ Refresh token
-  if (!refreshToken) {
-    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
-  }
+  if (!refreshToken) return unauthorized();
 
   try {
     const payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_KEY);
@@ -36,10 +34,7 @@ export function auth(req) {
 
     const headers = new Headers(req.headers);
     headers.set("x-user-id", payload.userId);
-    console.log("2" , payload.userId)
-    const res = NextResponse.next({
-      request: { headers },
-    });
+    const res = NextResponse.next({ request: { headers } });
 
     res.cookies.set("accessToken", newAccessToken, {
       httpOnly: true,
@@ -51,6 +46,6 @@ export function auth(req) {
 
     return res;
   } catch {
-    return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+    return unauthorized();
   }
 }
