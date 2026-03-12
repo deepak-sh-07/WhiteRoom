@@ -8,7 +8,7 @@ import { Awareness } from "y-protocols/awareness";
 import { IndexeddbPersistence } from "y-indexeddb";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
-import { Lock, Shield, MessageSquare, Users } from 'lucide-react';
+import { Lock, Shield, MessageSquare, Users, X } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
 
@@ -19,6 +19,7 @@ import VideoTile     from "@/components/VideoTile";
 import ControlBar    from "@/components/ControlBar";
 import ChatPanel     from "@/components/ChatPanel";
 import PresenceSidebar from "@/components/PresenceSidebar";
+import LogoutButton   from "@/components/LogoutButton";
 
 export default function Room() {
   const { roomId } = useParams();
@@ -31,12 +32,17 @@ export default function Room() {
   const [messages, setMessages]         = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
   const [allPeerIds, setAllPeerIds]     = useState([]);
-  const [isChatOpen, setIsChatOpen]       = useState(true);
+  const [isChatOpen, setIsChatOpen]       = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [peerStates, setPeerStates]       = useState({}); // peerId → connectionState
+  const [peerStates, setPeerStates]       = useState({});
   const [isMicOn, setIsMicOn]           = useState(true);
   const [isCameraOn, setIsCameraOn]     = useState(true);
-  const [view, setView] = useState("video"); // "video" | "whiteboard" | "docs"
+  const [view, setView] = useState("video");
+
+  // ── Waiting room state ────────────────────────────────────────
+  const [waitStatus, setWaitStatus]         = useState("idle"); // "idle" | "waiting" | "admitted" | "rejected"
+  const [joinRequests, setJoinRequests]     = useState([]); // host sees these
+  // { requestId, peerId, name }
 
   // ── Stable refs (never stale) ──
   const roomIdRef      = useRef(roomId);
@@ -397,13 +403,31 @@ export default function Room() {
     };
 
     const onConnect = () => {
-      console.log("[signaling] connected, joining room:", roomId);
+      console.log("[signaling] connected, requesting to join room:", roomId);
       setConnected(true);
-      socket.emit("join-room", roomId);
+      setWaitStatus("waiting");
+      // Send name from session storage if available, fallback to "Guest"
+      const name = sessionStorage.getItem("userName") ?? "Guest";
+      socket.emit("join-request", { roomId, name });
     };
 
-    // On reconnect: re-broadcast local Yjs state to all open peers
-    // so any offline edits made while disconnected get merged in
+    // Admitted — server says we can enter
+    const onAdmitted = () => {
+      console.log("[signaling] admitted to room");
+      setWaitStatus("admitted");
+    };
+
+    // Rejected — host said no
+    const onRejected = () => {
+      console.log("[signaling] rejected by host");
+      setWaitStatus("rejected");
+    };
+
+    // Host receives this when someone wants to join
+    const onJoinRequest = ({ requestId, peerId, name }) => {
+      setJoinRequests(prev => [...prev, { requestId, peerId, name }]);
+    };
+
     const onReconnect = async () => {
       console.log("[signaling] reconnected — re-syncing Yjs state to peers");
       if (!ydocRef.current) return;
@@ -417,20 +441,26 @@ export default function Room() {
       broadcastAwareness();
     };
 
-    socket.on("connect",       onConnect);
-    socket.on("reconnect",     onReconnect);
-    socket.on("disconnect",    () => { setConnected(false); console.warn("[signaling] disconnected"); });
-    socket.on("role",          onRole);
-    socket.on("room-peers",    onRoomPeers);
-    socket.on("peer-joined",   onPeerJoined);
-    socket.on("offer",         onOffer);
-    socket.on("answer",        onAnswer);
-    socket.on("ice-candidate", onIce);
-    socket.on("peer-left",     onPeerLeft);
+    socket.on("connect",        onConnect);
+    socket.on("reconnect",      onReconnect);
+    socket.on("disconnect",     () => { setConnected(false); console.warn("[signaling] disconnected"); });
+    socket.on("join-admitted",  onAdmitted);
+    socket.on("join-rejected",  onRejected);
+    socket.on("join-request",   onJoinRequest);
+    socket.on("rate-limited",   ({ event }) => console.warn(`[rate-limit] blocked on "${event}"`));
+    socket.on("role",           onRole);
+    socket.on("room-peers",     onRoomPeers);
+    socket.on("peer-joined",    onPeerJoined);
+    socket.on("offer",          onOffer);
+    socket.on("answer",         onAnswer);
+    socket.on("ice-candidate",  onIce);
+    socket.on("peer-left",      onPeerLeft);
 
     if (socket.connected) {
       setConnected(true);
-      socket.emit("join-room", roomId);
+      setWaitStatus("waiting");
+      const name = sessionStorage.getItem("userName") ?? "Guest";
+      socket.emit("join-request", { roomId, name });
     } else {
       socket.connect();
     }
@@ -439,6 +469,9 @@ export default function Room() {
       socket.off("connect",       onConnect);
       socket.off("reconnect",     onReconnect);
       socket.off("disconnect");
+      socket.off("join-admitted", onAdmitted);
+      socket.off("join-rejected", onRejected);
+      socket.off("join-request",  onJoinRequest);
       socket.off("role",          onRole);
       socket.off("room-peers",    onRoomPeers);
       socket.off("peer-joined",   onPeerJoined);
@@ -477,7 +510,69 @@ export default function Room() {
   const handleSend    = () => { sendEncryptedChat(msg); setMsg(""); };
   const handleKeyDown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
   const toggleMic     = () => { localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !isMicOn; }); setIsMicOn(v => !v); };
-  const toggleCamera  = () => { localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !isCameraOn; }); setIsCameraOn(v => !v); };
+  // ── Camera toggle — replaces real track with black frame so hardware turns off
+  const blackTrackRef = useRef(null);
+  const realTrackRef  = useRef(null);
+
+  const toggleCamera = async () => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+
+    if (isCameraOn) {
+      // Turning OFF — replace real track with a black canvas track
+      const realTrack = stream.getVideoTracks()[0];
+      if (!realTrack) { setIsCameraOn(false); return; }
+
+      realTrackRef.current = realTrack;
+
+      // Create a black canvas track
+      const canvas = Object.assign(document.createElement("canvas"), { width: 640, height: 480 });
+      canvas.getContext("2d").fillRect(0, 0, 640, 480);
+      const blackTrack = canvas.captureStream(0).getVideoTracks()[0];
+      blackTrackRef.current = blackTrack;
+
+      // Replace in all peer connections
+      for (const pc of Object.values(pcsRef.current)) {
+        const sender = pc.getSenders().find(s => s.track?.kind === "video");
+        if (sender) await sender.replaceTrack(blackTrack);
+      }
+
+      // Replace in local stream so local preview goes black
+      stream.removeTrack(realTrack);
+      stream.addTrack(blackTrack);
+      realTrack.stop(); // ← this turns off the camera light
+
+      setIsCameraOn(false);
+    } else {
+      // Turning ON — get a fresh camera track
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const newTrack = newStream.getVideoTracks()[0];
+
+        // Replace black track in all peer connections
+        for (const pc of Object.values(pcsRef.current)) {
+          const sender = pc.getSenders().find(s => s.track?.kind === "video");
+          if (sender) await sender.replaceTrack(newTrack);
+        }
+
+        // Replace in local stream
+        const blackTrack = blackTrackRef.current;
+        if (blackTrack) {
+          stream.removeTrack(blackTrack);
+          blackTrack.stop();
+        }
+        stream.addTrack(newTrack);
+        realTrackRef.current = newTrack;
+
+        // Refresh local video element
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+        setIsCameraOn(true);
+      } catch (err) {
+        console.error("[camera] failed to re-acquire camera", err);
+      }
+    }
+  };
   const sendWbMsg     = useCallback((type, payload) => broadcast(type, payload), []);
 
   // ── Cursor broadcast — throttled to 20fps, never during active stroke ──
@@ -512,10 +607,68 @@ export default function Room() {
     return () => clearInterval(interval);
   }, []);
 
+  // ── Approve / reject handlers (host) ─────────────────────────
+  const approveJoin = (requestId) => {
+    socket.emit("join-approve", { requestId });
+    setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
+  };
+  const rejectJoin = (requestId) => {
+    socket.emit("join-reject", { requestId });
+    setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
+  };
+
   // ── Grid layout ──
   const totalTiles = 1 + allPeerIds.length;
   const cols = totalTiles === 1 ? 1 : totalTiles <= 4 ? 2 : 3;
   const rows = totalTiles === 1 ? 1 : totalTiles <= 2 ? 1 : totalTiles <= 4 ? 2 : Math.ceil(totalTiles / 3);
+
+  // ── Waiting screen ────────────────────────────────────────────
+  if (waitStatus === "waiting") {
+    return (
+      <div style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+        <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "20px" }}>
+          <div style={{ width: "56px", height: "56px", borderRadius: "16px", background: "linear-gradient(135deg,#6366f1,#14b8a6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 32px rgba(99,102,241,.4)" }}>
+            <Lock className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#f1f5f9", margin: "0 0 8px" }}>Waiting for host</h2>
+            <p style={{ fontSize: "13px", color: "#475569", margin: 0 }}>The host will let you in soon</p>
+          </div>
+          {/* Animated dots */}
+          <div style={{ display: "flex", gap: "6px" }}>
+            {[0, 1, 2].map(i => (
+              <div key={i} style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#6366f1", animation: `bounce 1.2s ${i * 0.2}s infinite`, opacity: 0.7 }} />
+            ))}
+          </div>
+          <p style={{ fontSize: "11px", color: "#1e293b", fontFamily: "monospace" }}>{roomId}</p>
+          <style>{`@keyframes bounce { 0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)} }`}</style>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Rejected screen ───────────────────────────────────────────
+  if (waitStatus === "rejected") {
+    return (
+      <div style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+        <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" }}>
+          <div style={{ width: "56px", height: "56px", borderRadius: "16px", background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.3)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <X className="w-6 h-6" style={{ color: "#ef4444" }} />
+          </div>
+          <div>
+            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#f1f5f9", margin: "0 0 8px" }}>Entry denied</h2>
+            <p style={{ fontSize: "13px", color: "#475569", margin: 0 }}>The host declined your request to join</p>
+          </div>
+          <button
+            onClick={() => window.history.back()}
+            style={{ padding: "10px 24px", borderRadius: "10px", border: "none", background: "rgba(99,102,241,.15)", color: "#818cf8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}
+          >
+            Go back
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ══════════════════════════════════════════
   //  RENDER
@@ -606,6 +759,8 @@ export default function Room() {
               <Users className="w-3.5 h-3.5" />
               {users.length} online
             </button>
+
+            <LogoutButton variant="icon" />
           </div>
         </motion.header>
 
@@ -712,7 +867,7 @@ export default function Room() {
 
       </div>
 
-      {/* ── Floating Chat — ChatPanel replaces the entire inline chat block ── */}
+      {/* ── Floating Chat ── */}
       <ChatPanel
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}
@@ -721,6 +876,71 @@ export default function Room() {
         role={role}
         onSend={sendEncryptedChat}
       />
+
+      {/* ── Host join-request approval popup ── */}
+      <AnimatePresence>
+        {joinRequests.length > 0 && (
+          <motion.div
+            key="join-requests"
+            initial={{ x: 60, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 60, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            style={{
+              position: "fixed", bottom: "80px", right: "20px", zIndex: 60,
+              display: "flex", flexDirection: "column", gap: "8px",
+              maxWidth: "300px",
+            }}
+          >
+            {joinRequests.map(req => (
+              <div key={req.requestId} style={{
+                background: "rgba(13,15,23,.97)", backdropFilter: "blur(24px)",
+                border: "1px solid rgba(99,102,241,.25)", borderRadius: "14px",
+                padding: "14px 16px", boxShadow: "0 8px 32px rgba(0,0,0,.5)",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
+                  <div style={{
+                    width: "36px", height: "36px", borderRadius: "10px", flexShrink: 0,
+                    background: "rgba(99,102,241,.2)", border: "1px solid rgba(99,102,241,.3)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: "14px", fontWeight: "800", color: "#818cf8",
+                  }}>
+                    {req.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontSize: "13px", fontWeight: "700", color: "#f1f5f9" }}>{req.name}</p>
+                    <p style={{ margin: 0, fontSize: "11px", color: "#475569" }}>wants to join</p>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button
+                    onClick={() => approveJoin(req.requestId)}
+                    style={{
+                      flex: 1, padding: "8px", borderRadius: "8px", border: "none",
+                      background: "rgba(16,185,129,.15)", color: "#10b981",
+                      fontSize: "12px", fontWeight: "700", cursor: "pointer",
+                      border: "1px solid rgba(16,185,129,.25)",
+                    }}
+                  >
+                    Admit
+                  </button>
+                  <button
+                    onClick={() => rejectJoin(req.requestId)}
+                    style={{
+                      flex: 1, padding: "8px", borderRadius: "8px", border: "none",
+                      background: "rgba(239,68,68,.1)", color: "#ef4444",
+                      fontSize: "12px", fontWeight: "700", cursor: "pointer",
+                      border: "1px solid rgba(239,68,68,.2)",
+                    }}
+                  >
+                    Deny
+                  </button>
+                </div>
+              </div>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

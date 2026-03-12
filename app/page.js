@@ -2,6 +2,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Video, Plus, Hash, Lock, Users, Zap } from "lucide-react";
+import LogoutButton from "@/components/LogoutButton";
+
 
 export default function Home() {
   const [userId, setUserId] = useState(null);
@@ -42,6 +44,7 @@ export default function Home() {
   );
 
   return (
+    
     <div style={{
       minHeight: "100vh",
       background: "linear-gradient(135deg, #0a0a0f 0%, #0d1117 40%, #0a0e1a 100%)",
@@ -101,6 +104,7 @@ export default function Home() {
           <span style={{ fontSize: "12px", fontWeight: "500", color: "#64748b", fontFamily: "monospace" }}>
             {userId ? `${userId.slice(0, 8)}...` : "—"}
           </span>
+          <LogoutButton variant="icon" />
         </div>
       </nav>
 
@@ -237,5 +241,6 @@ export default function Home() {
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
+    
   );
 }
