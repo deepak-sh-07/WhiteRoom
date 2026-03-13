@@ -103,6 +103,15 @@ export default function LogoutButton({ variant = "default" }) {
             </p>
 
             {/* Buttons */}
+
+
+
+
+
+
+
+
+            
             <div style={{ display: "flex", gap: "10px" }}>
               <button
                 onClick={() => setShowConfirm(false)}
