@@ -99,6 +99,11 @@ export default function Home() {
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: "11px", fontWeight: "700", color: "white",
           }}>
+
+
+
+
+            
             {userId?.charAt(0)?.toUpperCase() ?? "U"}
           </div>
           <span style={{ fontSize: "12px", fontWeight: "500", color: "#64748b", fontFamily: "monospace" }}>
