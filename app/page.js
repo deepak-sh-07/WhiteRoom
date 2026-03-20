@@ -158,6 +158,8 @@ export default function Home() {
               transition: "all 0.2s", fontFamily: "inherit",
             }}
             onMouseEnter={e => {
+
+              
               e.currentTarget.style.borderColor = "rgba(99,102,241,0.45)";
               e.currentTarget.style.transform = "translateY(-2px)";
               e.currentTarget.style.boxShadow = "0 16px 40px rgba(0,0,0,0.5), 0 0 24px rgba(99,102,241,0.12)";
