@@ -24,6 +24,8 @@ const VideoTile = ({ videoRef, stream, label, isLocal = false, isCameraOn = true
         position: "relative",
         borderRadius: "14px",
         overflow: "hidden",
+        width: "100%",
+        height: "100%",
         minHeight: 0,
         background: style.background,
         border: style.border,

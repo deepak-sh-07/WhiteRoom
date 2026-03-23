@@ -2,12 +2,13 @@
 import { generateRoomKey, exportKey, importKey, encrypt, decrypt, generateRSAKeyPair, exportPublicKey, importPublicKey, encryptWithPublicKey, decryptWithPrivateKey } from "@/lib/crypto";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { socket } from "@/lib/socket";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import { IndexeddbPersistence } from "y-indexeddb";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
+import { playJoinSound, playLeaveSound, playKnockSound, unlockAudio } from "@/lib/sounds";
 import { Lock, Shield, MessageSquare, Users, X } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
@@ -23,6 +24,7 @@ import LogoutButton   from "@/components/LogoutButton";
 
 export default function Room() {
   const { roomId } = useParams();
+  const router = useRouter();
 
   // ── UI state ──
   const [connected, setConnected]       = useState(false);
@@ -236,6 +238,7 @@ export default function Room() {
           canvasCursor: s.cursor ?? null,
           docCursor: s.docCursor ?? null,
           lastActive: s.lastActive ?? null,
+          socketId: s.user?.socketId ?? null,
         })));
         break;
       }
@@ -390,6 +393,16 @@ export default function Room() {
       setRemoteStreams(p => { const n = { ...p }; delete n[peerId]; return n; });
       setAllPeerIds(p => p.filter(id => id !== peerId));
       setPeerStates(p => { const n = { ...p }; delete n[peerId]; return n; });
+      // Remove from users — match by socketId stored in awareness state
+      if (awarenessRef.current) {
+        for (const [clientId, state] of awarenessRef.current.states.entries()) {
+          if (state?.user?.socketId === peerId) {
+            awarenessRef.current.states.delete(clientId);
+            break;
+          }
+        }
+      }
+      setUsers(prev => prev.filter(u => u.isLocal || u.socketId !== peerId));
     };
 
     const onRole = ({ role }) => {
@@ -397,7 +410,7 @@ export default function Room() {
       setRole(role);
       if (awarenessRef.current) {
         const cur = awarenessRef.current.getLocalState() ?? {};
-        awarenessRef.current.setLocalState({ ...cur, user: { role, name: role } });
+        awarenessRef.current.setLocalState({ ...cur, user: { role, name: role, socketId: socket.id } });
       }
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
@@ -415,6 +428,7 @@ export default function Room() {
     const onAdmitted = () => {
       console.log("[signaling] admitted to room");
       setWaitStatus("admitted");
+      playJoinSound();
     };
 
     // Rejected — host said no
@@ -426,6 +440,7 @@ export default function Room() {
     // Host receives this when someone wants to join
     const onJoinRequest = ({ requestId, peerId, name }) => {
       setJoinRequests(prev => [...prev, { requestId, peerId, name }]);
+      playKnockSound();
     };
 
     const onReconnect = async () => {
@@ -484,6 +499,7 @@ export default function Room() {
       dcsRef.current = {};
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
+      playLeaveSound();
     };
   }, [roomId]);
 
@@ -509,7 +525,14 @@ export default function Room() {
   // msg/handleSend/handleKeyDown kept for ChatPanel's onSend prop
   const handleSend    = () => { sendEncryptedChat(msg); setMsg(""); };
   const handleKeyDown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
-  const toggleMic     = () => { localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !isMicOn; }); setIsMicOn(v => !v); };
+  const toggleMic = () => {
+    unlockAudio();
+    const tracks = localStreamRef.current?.getAudioTracks();
+    if (!tracks?.length) return;
+    const newState = !isMicOn;
+    tracks.forEach(t => { t.enabled = newState; });
+    setIsMicOn(newState);
+  };
   // ── Camera toggle — replaces real track with black frame so hardware turns off
   const blackTrackRef = useRef(null);
   const realTrackRef  = useRef(null);
@@ -608,24 +631,33 @@ export default function Room() {
   }, []);
 
   // ── Approve / reject handlers (host) ─────────────────────────
+  const leaveRoom = () => {
+    Object.values(pcsRef.current).forEach(pc => pc.close());
+    pcsRef.current = {};
+    dcsRef.current = {};
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    localStreamRef.current = null;
+    blackTrackRef.current?.stop();
+    socket.emit("peer-left", { roomId });
+    socket.disconnect();
+    playLeaveSound();
+    router.push("/");
+  };
+
   const approveJoin = (requestId) => {
     socket.emit("join-approve", { requestId });
     setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
   };
+
   const rejectJoin = (requestId) => {
     socket.emit("join-reject", { requestId });
     setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
   };
 
-  // ── Grid layout ──
-  const totalTiles = 1 + allPeerIds.length;
-  const cols = totalTiles === 1 ? 1 : totalTiles <= 4 ? 2 : 3;
-  const rows = totalTiles === 1 ? 1 : totalTiles <= 2 ? 1 : totalTiles <= 4 ? 2 : Math.ceil(totalTiles / 3);
-
   // ── Waiting screen ────────────────────────────────────────────
   if (waitStatus === "waiting") {
     return (
-      <div style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+      <div onClick={unlockAudio} style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
         <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "20px" }}>
           <div style={{ width: "56px", height: "56px", borderRadius: "16px", background: "linear-gradient(135deg,#6366f1,#14b8a6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 32px rgba(99,102,241,.4)" }}>
             <Lock className="w-6 h-6 text-white" />
@@ -780,20 +812,37 @@ export default function Room() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.15 }}
-                style={{ position: "absolute", inset: 0, padding: "10px", display: "grid", gap: "10px", gridTemplateColumns: `repeat(${cols},1fr)`, gridTemplateRows: `repeat(${rows},1fr)` }}
+                style={{ position: "absolute", inset: 0, padding: "10px", display: "flex", flexDirection: "column", gap: "10px" }}
               >
-                <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" />
-                {allPeerIds.map((peerId, idx) => (
-                  <motion.div
-                    key={peerId}
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    <VideoTile stream={remoteStreams[peerId]} label={`Peer ${idx + 1}`} variant="remote" />
-                  </motion.div>
-                ))}
+                {allPeerIds.length === 0 ? (
+                  // Solo — host fills entire space
+                  <div style={{ flex: 1 }}>
+                    <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" style={{ width: "100%", height: "100%" }} />
+                  </div>
+                ) : (
+                  <>
+                    {/* Spotlight — host always large */}
+                    <div style={{ flex: 1, minHeight: 0 }}>
+                      <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" />
+                    </div>
+
+                    {/* Peer strip — fixed height at bottom */}
+                    <div style={{ display: "flex", gap: "10px", height: "140px", flexShrink: 0 }}>
+                      {allPeerIds.map((peerId, idx) => (
+                        <motion.div
+                          key={peerId}
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.2 }}
+                          style={{ flex: "0 0 200px", height: "100%" }}
+                        >
+                          <VideoTile stream={remoteStreams[peerId]} label={`Peer ${idx + 1}`} variant="remote" />
+                        </motion.div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -862,7 +911,7 @@ export default function Room() {
           transition={{ delay: 0.1 }}
           style={{ background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "0 0 16px 16px", border: "1px solid rgba(99,102,241,.15)", borderTop: "1px solid rgba(99,102,241,.1)", boxShadow: "0 -4px 24px rgba(0,0,0,.3)" }}
         >
-          <ControlBar isMicOn={isMicOn} isCameraOn={isCameraOn} toggleMic={toggleMic} toggleCamera={toggleCamera} />
+          <ControlBar isMicOn={isMicOn} isCameraOn={isCameraOn} toggleMic={toggleMic} toggleCamera={toggleCamera} onLeave={leaveRoom} />
         </motion.div>
 
       </div>
