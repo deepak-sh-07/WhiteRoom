@@ -642,6 +642,10 @@ export default function Room() {
     socket.disconnect();
     playLeaveSound();
     router.push("/");
+
+
+
+    
   };
 
   const approveJoin = (requestId) => {
