@@ -238,7 +238,9 @@ export default function Room() {
           canvasCursor: s.cursor ?? null,
           docCursor: s.docCursor ?? null,
           lastActive: s.lastActive ?? null,
-          socketId: s.user?.socketId ?? null,
+          socketId: s.socketId ?? null,
+          micOn: s.micOn ?? true,
+          cameraOn: s.cameraOn ?? true,
         })));
         break;
       }
@@ -396,7 +398,7 @@ export default function Room() {
       // Remove from users — match by socketId stored in awareness state
       if (awarenessRef.current) {
         for (const [clientId, state] of awarenessRef.current.states.entries()) {
-          if (state?.user?.socketId === peerId) {
+          if (state?.socketId === peerId) {
             awarenessRef.current.states.delete(clientId);
             break;
           }
@@ -410,7 +412,7 @@ export default function Room() {
       setRole(role);
       if (awarenessRef.current) {
         const cur = awarenessRef.current.getLocalState() ?? {};
-        awarenessRef.current.setLocalState({ ...cur, user: { role, name: role, socketId: socket.id } });
+        awarenessRef.current.setLocalState({ ...cur, socketId: socket.id, user: { role, name: role } });
       }
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
@@ -419,8 +421,12 @@ export default function Room() {
       console.log("[signaling] connected, requesting to join room:", roomId);
       setConnected(true);
       setWaitStatus("waiting");
-      // Send name from session storage if available, fallback to "Guest"
       const name = sessionStorage.getItem("userName") ?? "Guest";
+      // Store socketId at top level so peers can match it to peerId
+      if (awarenessRef.current) {
+        const cur = awarenessRef.current.getLocalState() ?? {};
+        awarenessRef.current.setLocalState({ ...cur, socketId: socket.id, micOn: true, cameraOn: true });
+      }
       socket.emit("join-request", { roomId, name });
     };
 
@@ -532,6 +538,12 @@ export default function Room() {
     const newState = !isMicOn;
     tracks.forEach(t => { t.enabled = newState; });
     setIsMicOn(newState);
+    // Broadcast to peers so their UI reflects mute state
+    if (awarenessRef.current) {
+      const cur = awarenessRef.current.getLocalState() ?? {};
+      awarenessRef.current.setLocalState({ ...cur, micOn: newState });
+      broadcastAwareness();
+    }
   };
   // ── Camera toggle — replaces real track with black frame so hardware turns off
   const blackTrackRef = useRef(null);
@@ -566,6 +578,12 @@ export default function Room() {
       realTrack.stop(); // ← this turns off the camera light
 
       setIsCameraOn(false);
+      // Broadcast to peers
+      if (awarenessRef.current) {
+        const cur = awarenessRef.current.getLocalState() ?? {};
+        awarenessRef.current.setLocalState({ ...cur, cameraOn: false });
+        broadcastAwareness();
+      }
     } else {
       // Turning ON — get a fresh camera track
       try {
@@ -591,6 +609,12 @@ export default function Room() {
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
         setIsCameraOn(true);
+        // Broadcast to peers
+        if (awarenessRef.current) {
+          const cur = awarenessRef.current.getLocalState() ?? {};
+          awarenessRef.current.setLocalState({ ...cur, cameraOn: true });
+          broadcastAwareness();
+        }
       } catch (err) {
         console.error("[camera] failed to re-acquire camera", err);
       }
@@ -642,10 +666,6 @@ export default function Room() {
     socket.disconnect();
     playLeaveSound();
     router.push("/");
-
-
-
-    
   };
 
   const approveJoin = (requestId) => {
@@ -816,37 +836,41 @@ export default function Room() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.15 }}
-                style={{ position: "absolute", inset: 0, padding: "10px", display: "flex", flexDirection: "column", gap: "10px" }}
+                style={{
+                  position: "absolute", inset: 0, padding: "10px",
+                  display: "grid", gap: "10px",
+                  // Total tiles = you + peers
+                  // 1 tile  → 1 col, 1 row
+                  // 2 tiles → 2 col, 1 row  (side by side)
+                  // 3-4 tiles → 2 col, 2 row (2×2)
+                  // 5-6 tiles → 3 col, 2 row
+                  gridTemplateColumns: allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr 1fr" : allPeerIds.length <= 3 ? "1fr 1fr" : "1fr 1fr 1fr",
+                  gridTemplateRows:    allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr"      : "1fr 1fr",
+                }}
               >
-                {allPeerIds.length === 0 ? (
-                  // Solo — host fills entire space
-                  <div style={{ flex: 1 }}>
-                    <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" style={{ width: "100%", height: "100%" }} />
-                  </div>
-                ) : (
-                  <>
-                    {/* Spotlight — host always large */}
-                    <div style={{ flex: 1, minHeight: 0 }}>
-                      <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} label={`You · ${role}`} variant="local" />
-                    </div>
-
-                    {/* Peer strip — fixed height at bottom */}
-                    <div style={{ display: "flex", gap: "10px", height: "140px", flexShrink: 0 }}>
-                      {allPeerIds.map((peerId, idx) => (
-                        <motion.div
-                          key={peerId}
-                          initial={{ opacity: 0, scale: 0.95 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.95 }}
-                          transition={{ duration: 0.2 }}
-                          style={{ flex: "0 0 200px", height: "100%" }}
-                        >
-                          <VideoTile stream={remoteStreams[peerId]} label={`Peer ${idx + 1}`} variant="remote" />
-                        </motion.div>
-                      ))}
-                    </div>
-                  </>
-                )}
+                <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} isMicOn={isMicOn} label={`You · ${role}`} variant="local" />
+                {allPeerIds.map((peerId, idx) => {
+                  // Match peer by socketId stored in awareness — fall back to index label
+                  const peerUser = users.find(u => u.socketId === peerId);
+                  return (
+                    <motion.div
+                      key={peerId}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      transition={{ duration: 0.2 }}
+                      style={{ minHeight: 0 }}
+                    >
+                      <VideoTile
+                        stream={remoteStreams[peerId]}
+                        label={peerUser?.name && peerUser.name !== "?" ? peerUser.name : `Peer ${idx + 1}`}
+                        variant="remote"
+                        isCameraOn={peerUser?.cameraOn ?? true}
+                        isMicOn={peerUser?.micOn ?? true}
+                      />
+                    </motion.div>
+                  );
+                })}
               </motion.div>
             )}
           </AnimatePresence>
