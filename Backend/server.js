@@ -2,7 +2,7 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
-import { createClient } from "ioredis";
+import Redis from "ioredis";
 import cors from "cors";
 
 const ALLOWED_ORIGIN = process.env.CLIENT_URL ?? "http://localhost:3000";
@@ -17,44 +17,38 @@ app.get("/health", (req, res) => res.json({ status: "ok", pid: process.pid }));
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: ALLOWED_ORIGIN, methods: ["GET", "POST"] },
-  // Required for sticky sessions — tells load balancer which server to pin to
   cookie: true,
 });
 
 // ══════════════════════════════════════════
 //  REDIS SETUP
 // ══════════════════════════════════════════
-const pubClient = createClient(REDIS_URL);
+const pubClient = new Redis(REDIS_URL);
 const subClient = pubClient.duplicate();
 
 pubClient.on("error", e => console.error("[redis:pub]", e.message));
 subClient.on("error", e => console.error("[redis:sub]", e.message));
 
-await pubClient.connect();
-await subClient.connect();
-console.log("✅ Redis connected");
+pubClient.on("connect", () => console.log("✅ Redis connected"));
 
 // Socket.io Redis adapter — makes all servers share socket events
-// Any io.to(roomId).emit() now reaches clients on ALL servers
 io.adapter(createAdapter(pubClient, subClient));
 
 // ── Redis key helpers ─────────────────────────────────────────────
 const KEY = {
-  roomHost:    (roomId)    => `whiteroom:host:${roomId}`,
-  pendingReq:  (requestId) => `whiteroom:req:${requestId}`,
-  socketRoom:  (socketId)  => `whiteroom:socket:${socketId}`,
+  roomHost:    (roomId)          => `whiteroom:host:${roomId}`,
+  pendingReq:  (requestId)       => `whiteroom:req:${requestId}`,
+  socketRoom:  (socketId)        => `whiteroom:socket:${socketId}`,
   rateLimiter: (socketId, event) => `whiteroom:rate:${socketId}:${event}`,
+  pendingReqs: (socketId)        => `whiteroom:pendingreqs:${socketId}`,
 };
 
 // ── Redis state helpers ───────────────────────────────────────────
-// Replace in-memory Maps with Redis so all servers share the same state
-
 async function getHost(roomId) {
   return pubClient.get(KEY.roomHost(roomId));
 }
 
 async function setHost(roomId, socketId) {
-  // Expire after 24h in case of ungraceful shutdown
   await pubClient.set(KEY.roomHost(roomId), socketId, "EX", 86400);
 }
 
@@ -63,7 +57,12 @@ async function clearHost(roomId) {
 }
 
 async function setPendingRequest(requestId, data) {
-  await pubClient.set(KEY.pendingReq(requestId), JSON.stringify(data), "EX", 300); // 5 min TTL
+  const socketId = data.socketId;
+  await Promise.all([
+    pubClient.set(KEY.pendingReq(requestId), JSON.stringify(data), "EX", 300),
+    pubClient.sadd(KEY.pendingReqs(socketId), requestId),
+    pubClient.expire(KEY.pendingReqs(socketId), 300),
+  ]);
 }
 
 async function getPendingRequest(requestId) {
@@ -71,8 +70,11 @@ async function getPendingRequest(requestId) {
   return raw ? JSON.parse(raw) : null;
 }
 
-async function deletePendingRequest(requestId) {
-  await pubClient.del(KEY.pendingReq(requestId));
+async function deletePendingRequest(requestId, socketId) {
+  await Promise.all([
+    pubClient.del(KEY.pendingReq(requestId)),
+    socketId ? pubClient.srem(KEY.pendingReqs(socketId), requestId) : Promise.resolve(),
+  ]);
 }
 
 async function setSocketRoom(socketId, roomId) {
@@ -89,7 +91,6 @@ async function clearSocketRoom(socketId) {
 
 // ══════════════════════════════════════════
 //  RATE LIMITER — Redis backed
-//  Works across all servers (no per-server counters)
 // ══════════════════════════════════════════
 const RATE_LIMITS = {
   "join-request":  { max: 5,  windowMs: 60_000 },
@@ -106,8 +107,7 @@ async function checkLimit(socket, event) {
   const count = await pubClient.incr(key);
 
   if (count === 1) {
-    // First call — set expiry for the window
-    await pubClient.pExpire(key, limit.windowMs);
+    await pubClient.pexpire(key, limit.windowMs);
   }
 
   if (count > limit.max) {
@@ -131,17 +131,14 @@ io.on("connection", (socket) => {
     const host = await getHost(roomId);
 
     if (!host) {
-      // First in room — become host
       await admitToRoom(socket, roomId);
       return;
     }
 
-    // Store pending request in Redis
     const requestId = `${socket.id}:${roomId}`;
     await setPendingRequest(requestId, { socketId: socket.id, roomId, name });
     socket.data.pendingRoom = roomId;
 
-    // Notify host — works even if host is on a different server
     io.to(host).emit("join-request", {
       requestId,
       peerId: socket.id,
@@ -154,23 +151,22 @@ io.on("connection", (socket) => {
   socket.on("join-approve", async ({ requestId }) => {
     const req = await getPendingRequest(requestId);
     if (!req) return;
-    await deletePendingRequest(requestId);
 
-    // joinerSocket may be on a different server — use io.to() not sockets.get()
+    await deletePendingRequest(requestId, req.socketId);
+
     console.log(`✅ Host approved ${req.socketId} for "${req.roomId}"`);
 
-    // Fetch the actual socket if on this server, otherwise signal via Redis
     const joinerSocket = io.sockets.sockets.get(req.socketId);
+
+    // FIX 1: strict if/else — only one path runs, never both
     if (joinerSocket) {
       await admitToRoom(joinerSocket, req.roomId);
     } else {
-      // Joiner is on another server — emit admit event to them directly
-      // The Redis adapter routes io.to(socketId) across servers
       io.to(req.socketId).emit("join-admitted-internal", { roomId: req.roomId });
     }
   });
 
-  // Handle cross-server admit (joiner receives this if host was on different server)
+  // Cross-server admit — fires when host and joiner are on different servers
   socket.on("join-admitted-internal", async ({ roomId }) => {
     await admitToRoom(socket, roomId);
   });
@@ -178,7 +174,8 @@ io.on("connection", (socket) => {
   socket.on("join-reject", async ({ requestId }) => {
     const req = await getPendingRequest(requestId);
     if (!req) return;
-    await deletePendingRequest(requestId);
+
+    await deletePendingRequest(requestId, req.socketId);
     console.log(`❌ Host rejected ${req.socketId} for "${req.roomId}"`);
     io.to(req.socketId).emit("join-rejected", { roomId: req.roomId });
   });
@@ -237,10 +234,15 @@ io.on("connection", (socket) => {
 
     await clearSocketRoom(socket.id);
 
-    // Clean up any pending requests from this socket
-    // Scan for keys matching this socket (TTL handles cleanup automatically too)
-    const keys = await pubClient.keys(`whiteroom:req:${socket.id}:*`);
-    if (keys.length) await pubClient.del(keys);
+    // FIX 2: O(1) cleanup using per-socket Set instead of keys() scan
+    const setKey = KEY.pendingReqs(socket.id);
+    const pendingIds = await pubClient.smembers(setKey);
+    if (pendingIds.length) {
+      await pubClient.del([
+        setKey,
+        ...pendingIds.map(id => KEY.pendingReq(id)),
+      ]);
+    }
   });
 });
 
