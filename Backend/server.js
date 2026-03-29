@@ -222,6 +222,10 @@ io.on("connection", (socket) => {
     console.log(`❌ Disconnected: ${socket.id} (pid:${process.pid})`);
     const roomId = socket.data.roomId ?? await getSocketRoom(socket.id);
 
+
+
+
+    
     if (roomId) {
       socket.to(roomId).emit("peer-left", { peerId: socket.id });
 
