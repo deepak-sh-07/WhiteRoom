@@ -14,6 +14,14 @@ app.use(cors({ origin: ALLOWED_ORIGIN }));
 // ── Health check endpoint (load balancer pings this) ──────────────
 app.get("/health", (req, res) => res.json({ status: "ok", pid: process.pid }));
 
+// ── Dev only: manually clear a stale room ────────────────────────
+app.delete("/dev/room/:roomId", async (req, res) => {
+  const { roomId } = req.params;
+  await clearHost(roomId);
+  console.log(`🧹 Manually cleared stale host for room "${roomId}"`);
+  res.json({ cleared: roomId });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: ALLOWED_ORIGIN, methods: ["GET", "POST"] },
@@ -28,7 +36,6 @@ const subClient = pubClient.duplicate();
 
 pubClient.on("error", e => console.error("[redis:pub]", e.message));
 subClient.on("error", e => console.error("[redis:sub]", e.message));
-
 pubClient.on("connect", () => console.log("✅ Redis connected"));
 
 // Socket.io Redis adapter — makes all servers share socket events
@@ -128,7 +135,17 @@ io.on("connection", (socket) => {
   socket.on("join-request", async ({ roomId, name }) => {
     if (!await checkLimit(socket, "join-request")) return;
 
-    const host = await getHost(roomId);
+    let host = await getHost(roomId);
+
+    // ── Auto-heal stale host key ──────────────────────────────────
+    // If the stored host socket is no longer connected (e.g. server
+    // crashed without a clean disconnect), clear the key so the next
+    // person in becomes the new host instead of waiting forever.
+    if (host && !io.sockets.sockets.get(host)) {
+      console.log(`⚠️  Stale host key for "${roomId}" (${host}) — auto-clearing`);
+      await clearHost(roomId);
+      host = null;
+    }
 
     if (!host) {
       await admitToRoom(socket, roomId);
@@ -153,15 +170,14 @@ io.on("connection", (socket) => {
     if (!req) return;
 
     await deletePendingRequest(requestId, req.socketId);
-
     console.log(`✅ Host approved ${req.socketId} for "${req.roomId}"`);
 
     const joinerSocket = io.sockets.sockets.get(req.socketId);
 
-    // FIX 1: strict if/else — only one path runs, never both
     if (joinerSocket) {
       await admitToRoom(joinerSocket, req.roomId);
     } else {
+      // Joiner is on a different server — route via Redis adapter
       io.to(req.socketId).emit("join-admitted-internal", { roomId: req.roomId });
     }
   });
@@ -222,10 +238,6 @@ io.on("connection", (socket) => {
     console.log(`❌ Disconnected: ${socket.id} (pid:${process.pid})`);
     const roomId = socket.data.roomId ?? await getSocketRoom(socket.id);
 
-
-
-
-    
     if (roomId) {
       socket.to(roomId).emit("peer-left", { peerId: socket.id });
 
@@ -238,7 +250,7 @@ io.on("connection", (socket) => {
 
     await clearSocketRoom(socket.id);
 
-    // FIX 2: O(1) cleanup using per-socket Set instead of keys() scan
+    // O(1) cleanup using per-socket Set instead of keys() scan
     const setKey = KEY.pendingReqs(socket.id);
     const pendingIds = await pubClient.smembers(setKey);
     if (pendingIds.length) {
@@ -249,6 +261,6 @@ io.on("connection", (socket) => {
     }
   });
 });
-//redis change added
+
 const PORT = process.env.PORT ?? 3001;
 server.listen(PORT, () => console.log(`🚀 Signaling server on :${PORT} (pid:${process.pid})`));
