@@ -13,38 +13,36 @@ import { Lock, Shield, MessageSquare, Users, X } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
 
-// ── New design-system components ──
-import StatusBadge   from "@/components/StatusBadge";
-import ViewSwitcher  from "@/components/ViewSwitcher";
-import VideoTile     from "@/components/VideoTile";
-import ControlBar    from "@/components/ControlBar";
-import ChatPanel     from "@/components/ChatPanel";
+import StatusBadge    from "@/components/StatusBadge";
+import ViewSwitcher   from "@/components/ViewSwitcher";
+import VideoTile      from "@/components/VideoTile";
+import ControlBar     from "@/components/ControlBar";
+import ChatPanel      from "@/components/ChatPanel";
 import PresenceSidebar from "@/components/PresenceSidebar";
-import LogoutButton   from "@/components/LogoutButton";
+import LogoutButton    from "@/components/LogoutButton";
 
 export default function Room() {
   const { roomId } = useParams();
   const router = useRouter();
 
   // ── UI state ──
-  const [connected, setConnected]       = useState(false);
-  const [role, setRole]                 = useState(null);
-  const [msg, setMsg]                   = useState("");
-  const [users, setUsers]               = useState([]);
-  const [messages, setMessages]         = useState([]);
-  const [remoteStreams, setRemoteStreams] = useState({});
-  const [allPeerIds, setAllPeerIds]     = useState([]);
+  const [connected, setConnected]         = useState(false);
+  const [role, setRole]                   = useState(null);
+  const [msg, setMsg]                     = useState("");
+  const [users, setUsers]                 = useState([]);
+  const [messages, setMessages]           = useState([]);
+  const [remoteStreams, setRemoteStreams]  = useState({});
+  const [allPeerIds, setAllPeerIds]       = useState([]);
   const [isChatOpen, setIsChatOpen]       = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [peerStates, setPeerStates]       = useState({});
-  const [isMicOn, setIsMicOn]           = useState(true);
-  const [isCameraOn, setIsCameraOn]     = useState(true);
-  const [view, setView] = useState("video");
+  const [isMicOn, setIsMicOn]             = useState(true);
+  const [isCameraOn, setIsCameraOn]       = useState(true);
+  const [view, setView]                   = useState("video");
 
   // ── Waiting room state ────────────────────────────────────────
-  const [waitStatus, setWaitStatus]         = useState("idle"); // "idle" | "waiting" | "admitted" | "rejected"
-  const [joinRequests, setJoinRequests]     = useState([]); // host sees these
-  // { requestId, peerId, name }
+  const [waitStatus, setWaitStatus]     = useState("idle"); // "idle"|"waiting"|"admitted"|"rejected"
+  const [joinRequests, setJoinRequests] = useState([]);     // host sees these { requestId, peerId, name }
 
   // ── Stable refs (never stale) ──
   const roomIdRef      = useRef(roomId);
@@ -59,6 +57,9 @@ export default function Room() {
   const pendingIceRef  = useRef({});
   const ydocRef        = useRef(null);
   const awarenessRef   = useRef(null);
+
+  // ── Track if join-request already sent to prevent duplicates ──
+  const joinRequestSentRef = useRef(false);
 
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
 
@@ -148,14 +149,13 @@ export default function Room() {
     channel.onmessage = e => onDcMessage(e.data, peerId);
     channel.onclose   = () => console.warn(`[dc:${peerId}] closed`);
     channel.onerror   = e => {
-      // RTCDataChannel errors often come with empty event objects — extract what we can
       const msg = e?.message ?? e?.error?.message ?? "unknown";
       const state = dcsRef.current[peerId]?.readyState ?? "n/a";
       console.warn(`[dc:${peerId}] error — readyState: ${state}, msg: ${msg}`);
     };
   };
 
-  const DC_MAX_BYTES = 200_000; // stay well under the 256KB SCTP limit
+  const DC_MAX_BYTES = 200_000;
 
   const sendTo = (peerId, type, payload) => {
     const ch = dcsRef.current[peerId];
@@ -166,7 +166,6 @@ export default function Room() {
         console.warn(`[dc:${peerId}] message too large (${raw.length} bytes), type=${type} — dropping`);
         return;
       }
-      // Back-pressure: drop if send buffer is filling up
       if (ch.bufferedAmount > DC_MAX_BYTES) {
         console.warn(`[dc:${peerId}] buffer full (${ch.bufferedAmount}), dropping type=${type}`);
         return;
@@ -217,7 +216,6 @@ export default function Room() {
           const raw = await decryptWithPrivateKey(rsaKeysRef.current[peerId].privateKey, msg.payload.key);
           roomKeysRef.current[peerId] = await importKey(raw);
           broadcastAwareness();
-          // Send full Yjs state so late joiners get current doc
           if (ydocRef.current) {
             const fullState = Y.encodeStateAsUpdate(ydocRef.current);
             const k = roomKeysRef.current[peerId];
@@ -268,17 +266,11 @@ export default function Room() {
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
 
-    // ── IndexedDB persistence ─────────────────────────────────────
-    // Key is per-room so each room has its own local store.
-    // `synced` fires once the local DB state is loaded into the doc —
-    // only after that do we broadcast to peers so we send the full
-    // merged state (local offline edits + whatever peers have).
     const idb = new IndexeddbPersistence(`whiteroom:${roomId}`, ydoc);
     idbRef.current = idb;
 
     idb.on("synced", () => {
       console.log("[idb] local state loaded from IndexedDB");
-      // Re-broadcast awareness now that local doc is hydrated
       broadcastAwareness();
     });
 
@@ -319,6 +311,28 @@ export default function Room() {
           console.log(`[signaling] late-addTrack ${t.kind}`);
         }
       });
+    };
+
+    // ── Emit join-request exactly once per connection ─────────────
+    const emitJoinRequest = () => {
+      if (joinRequestSentRef.current) return;
+      joinRequestSentRef.current = true;
+      const name = sessionStorage.getItem("userName") ?? "Guest";
+      if (awarenessRef.current) {
+        const cur = awarenessRef.current.getLocalState() ?? {};
+        awarenessRef.current.setLocalState({ ...cur, socketId: socket.id, micOn: true, cameraOn: true });
+      }
+      console.log("[signaling] emitting join-request for room:", roomId);
+      socket.emit("join-request", { roomId, name });
+    };
+
+    const onConnect = () => {
+      console.log("[signaling] connected");
+      setConnected(true);
+      setWaitStatus("waiting");
+      // Reset the sent flag on fresh connect so reconnects work
+      joinRequestSentRef.current = false;
+      emitJoinRequest();
     };
 
     const onRoomPeers = async ({ peers }) => {
@@ -395,7 +409,6 @@ export default function Room() {
       setRemoteStreams(p => { const n = { ...p }; delete n[peerId]; return n; });
       setAllPeerIds(p => p.filter(id => id !== peerId));
       setPeerStates(p => { const n = { ...p }; delete n[peerId]; return n; });
-      // Remove from users — match by socketId stored in awareness state
       if (awarenessRef.current) {
         for (const [clientId, state] of awarenessRef.current.states.entries()) {
           if (state?.socketId === peerId) {
@@ -417,35 +430,23 @@ export default function Room() {
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
 
-    const onConnect = () => {
-      console.log("[signaling] connected, requesting to join room:", roomId);
-      setConnected(true);
-      setWaitStatus("waiting");
-      const name = sessionStorage.getItem("userName") ?? "Guest";
-      // Store socketId at top level so peers can match it to peerId
-      if (awarenessRef.current) {
-        const cur = awarenessRef.current.getLocalState() ?? {};
-        awarenessRef.current.setLocalState({ ...cur, socketId: socket.id, micOn: true, cameraOn: true });
-      }
-      socket.emit("join-request", { roomId, name });
-    };
-
-    // Admitted — server says we can enter
     const onAdmitted = () => {
       console.log("[signaling] admitted to room");
       setWaitStatus("admitted");
       playJoinSound();
     };
 
-    // Rejected — host said no
     const onRejected = () => {
       console.log("[signaling] rejected by host");
       setWaitStatus("rejected");
     };
 
-    // Host receives this when someone wants to join
     const onJoinRequest = ({ requestId, peerId, name }) => {
-      setJoinRequests(prev => [...prev, { requestId, peerId, name }]);
+      setJoinRequests(prev => {
+        // Prevent duplicate cards for same requestId
+        if (prev.find(r => r.requestId === requestId)) return prev;
+        return [...prev, { requestId, peerId, name }];
+      });
       playKnockSound();
     };
 
@@ -462,26 +463,29 @@ export default function Room() {
       broadcastAwareness();
     };
 
-    socket.on("connect",        onConnect);
-    socket.on("reconnect",      onReconnect);
-    socket.on("disconnect",     () => { setConnected(false); console.warn("[signaling] disconnected"); });
-    socket.on("join-admitted",  onAdmitted);
-    socket.on("join-rejected",  onRejected);
-    socket.on("join-request",   onJoinRequest);
-    socket.on("rate-limited",   ({ event }) => console.warn(`[rate-limit] blocked on "${event}"`));
-    socket.on("role",           onRole);
-    socket.on("room-peers",     onRoomPeers);
-    socket.on("peer-joined",    onPeerJoined);
-    socket.on("offer",          onOffer);
-    socket.on("answer",         onAnswer);
-    socket.on("ice-candidate",  onIce);
-    socket.on("peer-left",      onPeerLeft);
+    socket.on("connect",       onConnect);
+    socket.on("reconnect",     onReconnect);
+    socket.on("disconnect",    () => { setConnected(false); console.warn("[signaling] disconnected"); });
+    socket.on("join-admitted", onAdmitted);
+    socket.on("join-rejected", onRejected);
+    socket.on("join-request",  onJoinRequest);
+    socket.on("rate-limited",  ({ event }) => console.warn(`[rate-limit] blocked on "${event}"`));
+    socket.on("role",          onRole);
+    socket.on("room-peers",    onRoomPeers);
+    socket.on("peer-joined",   onPeerJoined);
+    socket.on("offer",         onOffer);
+    socket.on("answer",        onAnswer);
+    socket.on("ice-candidate", onIce);
+    socket.on("peer-left",     onPeerLeft);
 
+    // ── Connect or emit join-request if already connected ─────────
+    // Key fix: never emit join-request in two places.
+    // onConnect handles fresh connects, emitJoinRequest handles
+    // the case where socket was already connected before this effect ran.
     if (socket.connected) {
       setConnected(true);
       setWaitStatus("waiting");
-      const name = sessionStorage.getItem("userName") ?? "Guest";
-      socket.emit("join-request", { roomId, name });
+      emitJoinRequest();
     } else {
       socket.connect();
     }
@@ -505,6 +509,7 @@ export default function Room() {
       dcsRef.current = {};
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
+      joinRequestSentRef.current = false;
       playLeaveSound();
     };
   }, [roomId]);
@@ -528,9 +533,9 @@ export default function Room() {
     }
   };
 
-  // msg/handleSend/handleKeyDown kept for ChatPanel's onSend prop
   const handleSend    = () => { sendEncryptedChat(msg); setMsg(""); };
   const handleKeyDown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } };
+
   const toggleMic = () => {
     unlockAudio();
     const tracks = localStreamRef.current?.getAudioTracks();
@@ -538,14 +543,13 @@ export default function Room() {
     const newState = !isMicOn;
     tracks.forEach(t => { t.enabled = newState; });
     setIsMicOn(newState);
-    // Broadcast to peers so their UI reflects mute state
     if (awarenessRef.current) {
       const cur = awarenessRef.current.getLocalState() ?? {};
       awarenessRef.current.setLocalState({ ...cur, micOn: newState });
       broadcastAwareness();
     }
   };
-  // ── Camera toggle — replaces real track with black frame so hardware turns off
+
   const blackTrackRef = useRef(null);
   const realTrackRef  = useRef(null);
 
@@ -554,49 +558,41 @@ export default function Room() {
     if (!stream) return;
 
     if (isCameraOn) {
-      // Turning OFF — replace real track with a black canvas track
       const realTrack = stream.getVideoTracks()[0];
       if (!realTrack) { setIsCameraOn(false); return; }
 
       realTrackRef.current = realTrack;
 
-      // Create a black canvas track
       const canvas = Object.assign(document.createElement("canvas"), { width: 640, height: 480 });
       canvas.getContext("2d").fillRect(0, 0, 640, 480);
       const blackTrack = canvas.captureStream(0).getVideoTracks()[0];
       blackTrackRef.current = blackTrack;
 
-      // Replace in all peer connections
       for (const pc of Object.values(pcsRef.current)) {
         const sender = pc.getSenders().find(s => s.track?.kind === "video");
         if (sender) await sender.replaceTrack(blackTrack);
       }
 
-      // Replace in local stream so local preview goes black
       stream.removeTrack(realTrack);
       stream.addTrack(blackTrack);
-      realTrack.stop(); // ← this turns off the camera light
+      realTrack.stop();
 
       setIsCameraOn(false);
-      // Broadcast to peers
       if (awarenessRef.current) {
         const cur = awarenessRef.current.getLocalState() ?? {};
         awarenessRef.current.setLocalState({ ...cur, cameraOn: false });
         broadcastAwareness();
       }
     } else {
-      // Turning ON — get a fresh camera track
       try {
         const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
         const newTrack = newStream.getVideoTracks()[0];
 
-        // Replace black track in all peer connections
         for (const pc of Object.values(pcsRef.current)) {
           const sender = pc.getSenders().find(s => s.track?.kind === "video");
           if (sender) await sender.replaceTrack(newTrack);
         }
 
-        // Replace in local stream
         const blackTrack = blackTrackRef.current;
         if (blackTrack) {
           stream.removeTrack(blackTrack);
@@ -605,11 +601,9 @@ export default function Room() {
         stream.addTrack(newTrack);
         realTrackRef.current = newTrack;
 
-        // Refresh local video element
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
         setIsCameraOn(true);
-        // Broadcast to peers
         if (awarenessRef.current) {
           const cur = awarenessRef.current.getLocalState() ?? {};
           awarenessRef.current.setLocalState({ ...cur, cameraOn: true });
@@ -620,17 +614,16 @@ export default function Room() {
       }
     }
   };
-  const sendWbMsg     = useCallback((type, payload) => broadcast(type, payload), []);
 
-  // ── Cursor broadcast — throttled to 20fps, never during active stroke ──
+  const sendWbMsg = useCallback((type, payload) => broadcast(type, payload), []);
+
   const cursorThrottleRef = useRef(null);
   const pendingCursorRef  = useRef(null);
 
   const handleCursorMove = useCallback((x, y) => {
     if (!awarenessRef.current) return;
     pendingCursorRef.current = { x, y };
-
-    if (cursorThrottleRef.current) return; // already scheduled
+    if (cursorThrottleRef.current) return;
     cursorThrottleRef.current = setTimeout(() => {
       cursorThrottleRef.current = null;
       const pos = pendingCursorRef.current;
@@ -638,10 +631,9 @@ export default function Room() {
       const cur = awarenessRef.current.getLocalState() ?? {};
       awarenessRef.current.setLocalState({ ...cur, cursor: pos });
       broadcastAwareness();
-    }, 50); // 50ms = max 20fps for cursor updates
+    }, 50);
   }, []);
 
-  // ── Broadcast lastActive timestamp every 30s ─────────────────────
   useEffect(() => {
     const tick = () => {
       if (!awarenessRef.current) return;
@@ -649,12 +641,11 @@ export default function Room() {
       awarenessRef.current.setLocalState({ ...cur, lastActive: Date.now() });
       broadcastAwareness();
     };
-    tick(); // immediately on mount
+    tick();
     const interval = setInterval(tick, 30_000);
     return () => clearInterval(interval);
   }, []);
 
-  // ── Approve / reject handlers (host) ─────────────────────────
   const leaveRoom = () => {
     Object.values(pcsRef.current).forEach(pc => pc.close());
     pcsRef.current = {};
@@ -668,14 +659,22 @@ export default function Room() {
     router.push("/");
   };
 
+  // ── Approve / reject — guarded against double clicks ─────────
   const approveJoin = (requestId) => {
-    socket.emit("join-approve", { requestId });
-    setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
+    setJoinRequests(prev => {
+      // If already removed, do nothing (double click guard)
+      if (!prev.find(r => r.requestId === requestId)) return prev;
+      socket.emit("join-approve", { requestId });
+      return prev.filter(r => r.requestId !== requestId);
+    });
   };
 
   const rejectJoin = (requestId) => {
-    socket.emit("join-reject", { requestId });
-    setJoinRequests(prev => prev.filter(r => r.requestId !== requestId));
+    setJoinRequests(prev => {
+      if (!prev.find(r => r.requestId === requestId)) return prev;
+      socket.emit("join-reject", { requestId });
+      return prev.filter(r => r.requestId !== requestId);
+    });
   };
 
   // ── Waiting screen ────────────────────────────────────────────
@@ -690,7 +689,6 @@ export default function Room() {
             <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#f1f5f9", margin: "0 0 8px" }}>Waiting for host</h2>
             <p style={{ fontSize: "13px", color: "#475569", margin: 0 }}>The host will let you in soon</p>
           </div>
-          {/* Animated dots */}
           <div style={{ display: "flex", gap: "6px" }}>
             {[0, 1, 2].map(i => (
               <div key={i} style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#6366f1", animation: `bounce 1.2s ${i * 0.2}s infinite`, opacity: 0.7 }} />
@@ -770,7 +768,6 @@ export default function Room() {
           className="flex items-center justify-between flex-wrap gap-3"
           style={{ background: "rgba(15,17,26,.85)", backdropFilter: "blur(24px)", borderRadius: "16px 16px 0 0", border: "1px solid rgba(99,102,241,.15)", padding: "14px 20px", boxShadow: "0 4px 24px rgba(0,0,0,.4)" }}
         >
-          {/* Logo + room id */}
           <div className="flex items-center gap-3">
             <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: "linear-gradient(135deg,#6366f1,#14b8a6)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 16px rgba(99,102,241,.4)" }}>
               <Lock className="w-4 h-4 text-white" />
@@ -781,22 +778,14 @@ export default function Room() {
             </div>
           </div>
 
-          {/* Controls */}
           <div className="flex items-center gap-2 flex-wrap">
-            {/* StatusBadge — replaces the inline connected pill */}
             <StatusBadge connected={connected} />
-
-            {/* Role badge */}
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg"
                  style={{ background: "rgba(99,102,241,.1)", border: "1px solid rgba(99,102,241,.25)" }}>
               <Shield className="w-3 h-3" style={{ color: "#818cf8" }} />
               <span style={{ fontSize: "12px", fontWeight: "600", color: "#818cf8", textTransform: "capitalize" }}>{role}</span>
             </div>
-
-            {/* ViewSwitcher — replaces the three inline view buttons */}
             <ViewSwitcher view={view} setView={setView} />
-
-            {/* Chat toggle */}
             <button
               onClick={() => setIsChatOpen(!isChatOpen)}
               className="flex items-center gap-1.5 cursor-pointer"
@@ -805,8 +794,6 @@ export default function Room() {
               <MessageSquare className="w-3.5 h-3.5" />
               {isChatOpen ? "Hide Chat" : "Chat"}
             </button>
-
-            {/* Presence sidebar toggle */}
             <button
               onClick={() => setIsSidebarOpen(v => !v)}
               className="flex items-center gap-1.5 cursor-pointer"
@@ -815,7 +802,6 @@ export default function Room() {
               <Users className="w-3.5 h-3.5" />
               {users.length} online
             </button>
-
             <LogoutButton variant="icon" />
           </div>
         </motion.header>
@@ -823,94 +809,73 @@ export default function Room() {
         {/* ── Main + Sidebar ── */}
         <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
-        {/* ── Main ── */}
-        <div className="flex-1 relative overflow-hidden"
-             style={{ background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)" }}>
+          <div className="flex-1 relative overflow-hidden"
+               style={{ background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)" }}>
 
-          {/* Video grid */}
-          <AnimatePresence mode="wait">
-            {view === "video" && (
-              <motion.div
-                key="video"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                style={{
-                  position: "absolute", inset: 0, padding: "10px",
-                  display: "grid", gap: "10px",
-                  // Total tiles = you + peers
-                  // 1 tile  → 1 col, 1 row
-                  // 2 tiles → 2 col, 1 row  (side by side)
-                  // 3-4 tiles → 2 col, 2 row (2×2)
-                  // 5-6 tiles → 3 col, 2 row
-                  gridTemplateColumns: allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr 1fr" : allPeerIds.length <= 3 ? "1fr 1fr" : "1fr 1fr 1fr",
-                  gridTemplateRows:    allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr"      : "1fr 1fr",
-                }}
-              >
-                <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} isMicOn={isMicOn} label={`You · ${role}`} variant="local" />
-                {allPeerIds.map((peerId, idx) => {
-                  // Match peer by socketId stored in awareness — fall back to index label
-                  const peerUser = users.find(u => u.socketId === peerId);
-                  return (
-                    <motion.div
-                      key={peerId}
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.95 }}
-                      transition={{ duration: 0.2 }}
-                      style={{ minHeight: 0 }}
-                    >
-                      <VideoTile
-                        stream={remoteStreams[peerId]}
-                        label={peerUser?.name && peerUser.name !== "?" ? peerUser.name : `Peer ${idx + 1}`}
-                        variant="remote"
-                        isCameraOn={peerUser?.cameraOn ?? true}
-                        isMicOn={peerUser?.micOn ?? true}
-                      />
-                    </motion.div>
-                  );
-                })}
-              </motion.div>
-            )}
-          </AnimatePresence>
+            {/* Video grid */}
+            <AnimatePresence mode="wait">
+              {view === "video" && (
+                <motion.div
+                  key="video"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  style={{
+                    position: "absolute", inset: 0, padding: "10px",
+                    display: "grid", gap: "10px",
+                    gridTemplateColumns: allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr 1fr" : allPeerIds.length <= 3 ? "1fr 1fr" : "1fr 1fr 1fr",
+                    gridTemplateRows:    allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr" : "1fr 1fr",
+                  }}
+                >
+                  <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} isMicOn={isMicOn} label={`You · ${role}`} variant="local" />
+                  {allPeerIds.map((peerId, idx) => {
+                    const peerUser = users.find(u => u.socketId === peerId);
+                    return (
+                      <motion.div
+                        key={peerId}
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        transition={{ duration: 0.2 }}
+                        style={{ minHeight: 0 }}
+                      >
+                        <VideoTile
+                          stream={remoteStreams[peerId]}
+                          label={peerUser?.name && peerUser.name !== "?" ? peerUser.name : `Peer ${idx + 1}`}
+                          variant="remote"
+                          isCameraOn={peerUser?.cameraOn ?? true}
+                          isMicOn={peerUser?.micOn ?? true}
+                        />
+                      </motion.div>
+                    );
+                  })}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-          {/* Whiteboard */}
-          <AnimatePresence mode="wait">
-            {view === "whiteboard" && (
-              <motion.div
-                key="whiteboard"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                style={{ position: "absolute", inset: 0, zIndex: 2 }}
-              >
-                <WhiteboardPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} onCursorMove={handleCursorMove} />
-              </motion.div>
-            )}
-          </AnimatePresence>
+            {/* Whiteboard */}
+            <AnimatePresence mode="wait">
+              {view === "whiteboard" && (
+                <motion.div key="whiteboard" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} style={{ position: "absolute", inset: 0, zIndex: 2 }}>
+                  <WhiteboardPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users} onCursorMove={handleCursorMove} />
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-          {/* Docs */}
-          <AnimatePresence mode="wait">
-            {view === "docs" && (
-              <motion.div
-                key="docs"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                style={{ position: "absolute", inset: 0, zIndex: 2 }}
-              >
-                <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users}
-                  localName={users.find(u => u.isLocal)?.name ?? "You"}
-                  localColor={users.find(u => u.isLocal)?.color ?? "#c9a84c"}
-                  roomCode={roomId} />
-              </motion.div>
-            )}
-          </AnimatePresence>
+            {/* Docs */}
+            <AnimatePresence mode="wait">
+              {view === "docs" && (
+                <motion.div key="docs" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} style={{ position: "absolute", inset: 0, zIndex: 2 }}>
+                  <DocsPanel ydocRef={ydocRef} sendMessage={sendWbMsg} role={role} users={users}
+                    localName={users.find(u => u.isLocal)?.name ?? "You"}
+                    localColor={users.find(u => u.isLocal)?.color ?? "#c9a84c"}
+                    roomCode={roomId} />
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-        </div>{/* end main */}
+          </div>
 
           {/* ── Presence Sidebar ── */}
           <AnimatePresence>
@@ -923,16 +888,13 @@ export default function Room() {
                 transition={{ duration: 0.2, ease: "easeInOut" }}
                 style={{ overflow: "hidden", flexShrink: 0 }}
               >
-                <PresenceSidebar
-                  users={users}
-                  peerStates={peerStates}
-                  onClose={() => setIsSidebarOpen(false)}
-                />
+                <PresenceSidebar users={users} peerStates={peerStates} onClose={() => setIsSidebarOpen(false)} />
               </motion.div>
             )}
           </AnimatePresence>
 
-        </div>{/* end main + sidebar flex row */}
+        </div>
+
         <motion.div
           initial={{ y: 16, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -963,11 +925,7 @@ export default function Room() {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 60, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            style={{
-              position: "fixed", bottom: "80px", right: "20px", zIndex: 60,
-              display: "flex", flexDirection: "column", gap: "8px",
-              maxWidth: "300px",
-            }}
+            style={{ position: "fixed", bottom: "80px", right: "20px", zIndex: 60, display: "flex", flexDirection: "column", gap: "8px", maxWidth: "300px" }}
           >
             {joinRequests.map(req => (
               <div key={req.requestId} style={{
@@ -976,12 +934,7 @@ export default function Room() {
                 padding: "14px 16px", boxShadow: "0 8px 32px rgba(0,0,0,.5)",
               }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
-                  <div style={{
-                    width: "36px", height: "36px", borderRadius: "10px", flexShrink: 0,
-                    background: "rgba(99,102,241,.2)", border: "1px solid rgba(99,102,241,.3)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: "14px", fontWeight: "800", color: "#818cf8",
-                  }}>
+                  <div style={{ width: "36px", height: "36px", borderRadius: "10px", flexShrink: 0, background: "rgba(99,102,241,.2)", border: "1px solid rgba(99,102,241,.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px", fontWeight: "800", color: "#818cf8" }}>
                     {req.name.charAt(0).toUpperCase()}
                   </div>
                   <div>
@@ -992,23 +945,13 @@ export default function Room() {
                 <div style={{ display: "flex", gap: "8px" }}>
                   <button
                     onClick={() => approveJoin(req.requestId)}
-                    style={{
-                      flex: 1, padding: "8px", borderRadius: "8px", border: "none",
-                      background: "rgba(16,185,129,.15)", color: "#10b981",
-                      fontSize: "12px", fontWeight: "700", cursor: "pointer",
-                      border: "1px solid rgba(16,185,129,.25)",
-                    }}
+                    style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(16,185,129,.25)", background: "rgba(16,185,129,.15)", color: "#10b981", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}
                   >
                     Admit
                   </button>
                   <button
                     onClick={() => rejectJoin(req.requestId)}
-                    style={{
-                      flex: 1, padding: "8px", borderRadius: "8px", border: "none",
-                      background: "rgba(239,68,68,.1)", color: "#ef4444",
-                      fontSize: "12px", fontWeight: "700", cursor: "pointer",
-                      border: "1px solid rgba(239,68,68,.2)",
-                    }}
+                    style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.1)", color: "#ef4444", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}
                   >
                     Deny
                   </button>

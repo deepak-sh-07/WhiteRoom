@@ -48,6 +48,7 @@ const KEY = {
   socketRoom:  (socketId)        => `whiteroom:socket:${socketId}`,
   rateLimiter: (socketId, event) => `whiteroom:rate:${socketId}:${event}`,
   pendingReqs: (socketId)        => `whiteroom:pendingreqs:${socketId}`,
+  approveLock: (requestId)       => `whiteroom:lock:${requestId}`,
 };
 
 // ── Redis state helpers ───────────────────────────────────────────
@@ -138,9 +139,9 @@ io.on("connection", (socket) => {
     let host = await getHost(roomId);
 
     // ── Auto-heal stale host key ──────────────────────────────────
-    // If the stored host socket is no longer connected (e.g. server
-    // crashed without a clean disconnect), clear the key so the next
-    // person in becomes the new host instead of waiting forever.
+    // If stored host socket is no longer connected (e.g. server crashed
+    // without clean disconnect), clear so next person becomes host
+    // instead of waiting forever.
     if (host && !io.sockets.sockets.get(host)) {
       console.log(`⚠️  Stale host key for "${roomId}" (${host}) — auto-clearing`);
       await clearHost(roomId);
@@ -166,6 +167,17 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join-approve", async ({ requestId }) => {
+    // ── Atomic Redis lock — prevents duplicate processing ─────────
+    // NX = only set if key does Not eXist — exactly one server wins
+    // even if host double-clicks or two servers race
+    const locked = await pubClient.set(
+      KEY.approveLock(requestId), "1", "EX", 10, "NX"
+    );
+    if (!locked) {
+      console.log(`🔒 join-approve "${requestId}" already processed — ignoring duplicate`);
+      return;
+    }
+
     const req = await getPendingRequest(requestId);
     if (!req) return;
 
