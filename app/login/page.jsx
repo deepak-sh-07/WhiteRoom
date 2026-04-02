@@ -203,3 +203,6 @@ export default function Login() {
     </div>
   );
 }
+/*
+  This file defines a React component for a login and registration page. It uses state to manage form inputs, error messages, and whether the user is in login or registration mode. The component includes functions to handle login and registration by making API calls to the backend. It also features a password input with a toggle to show/hide the password, and displays error messages when login or registration fails. The UI is styled with Tailwind CSS classes for a modern look.
+*/
