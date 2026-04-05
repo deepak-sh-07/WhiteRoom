@@ -1,253 +1,220 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Video, Plus, Hash, Lock, Users, Zap } from "lucide-react";
+import { Plus, Hash, Lock, Video, Users, Shield, Zap } from "lucide-react";
 import LogoutButton from "@/components/LogoutButton";
+import ParticleCanvas from "@/components/ParticleCanvas";
 
+const C = {
+  indigo: "#7C8FFF",
+  teal: "#4DD9DC",
+  purple: "#a78bfa",
+  pink: "#f472b6",
+  text: "rgba(255,255,255,0.90)",
+  muted: "rgba(255,255,255,0.38)",
+  hint: "rgba(255,255,255,0.18)",
+  cardBg: "rgba(255,255,255,0.042)",
+  cardBorder: "rgba(255,255,255,0.08)",
+  navBg: "rgba(4,5,15,0.75)",
+};
+
+const gradText = {
+  background: "linear-gradient(100deg,#7C8FFF 0%,#4DD9DC 100%)",
+  WebkitBackgroundClip: "text",
+  WebkitTextFillColor: "transparent",
+};
+
+function ActionCard({ onClick, accentColor, accentRgb, gradFrom, gradTo, icon, title, desc, badge, badgeColor, badgeTextColor, badgeBorder }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        padding: "26px 24px 24px",
+        borderRadius: 18,
+        cursor: "pointer",
+        textAlign: "left",
+        background: hovered ? `rgba(${accentRgb},0.07)` : C.cardBg,
+        backdropFilter: "blur(32px)",
+        WebkitBackdropFilter: "blur(32px)",
+        border: `1px solid ${hovered ? `rgba(${accentRgb},0.4)` : C.cardBorder}`,
+        transform: hovered ? "translateY(-4px)" : "none",
+        boxShadow: hovered ? `0 24px 52px rgba(0,0,0,0.45), 0 0 32px rgba(${accentRgb},0.12)` : "0 8px 32px rgba(0,0,0,0.3)",
+        transition: "all 0.22s cubic-bezier(.16,1,.3,1)",
+        fontFamily: "inherit",
+        width: "100%",
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ position: "absolute", top: 0, left: "10%", right: "10%", height: 1, background: `linear-gradient(90deg,transparent,rgba(${accentRgb},0.7),transparent)`, opacity: hovered ? 1 : 0.35, transition: "opacity 0.22s" }} />
+      <div style={{ width: 48, height: 48, borderRadius: 14, background: `linear-gradient(135deg,${gradFrom},${gradTo})`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 16, boxShadow: `0 6px 20px rgba(${accentRgb},0.4)` }}>
+        {icon}
+      </div>
+      <div style={{ display: "inline-flex", alignItems: "center", padding: "3px 10px", borderRadius: 20, background: badgeColor, border: `1px solid ${badgeBorder}`, marginBottom: 10 }}>
+        <span style={{ fontSize: 10, fontFamily: "ui-monospace,monospace", color: badgeTextColor, fontWeight: 700, letterSpacing: "0.08em" }}>{badge}</span>
+      </div>
+      <div style={{ fontSize: 17, fontWeight: 800, color: "#fff", marginBottom: 7, letterSpacing: "-0.03em" }}>{title}</div>
+      <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.65, fontFamily: "ui-monospace,monospace", fontWeight: 300 }}>{desc}</div>
+      <div style={{ position: "absolute", bottom: 22, right: 22, opacity: hovered ? 1 : 0, transform: hovered ? "translate(0,0)" : "translate(-4px,4px)", transition: "all 0.22s", color: accentColor }}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 12h14M12 5l7 7-7 7"/>
+        </svg>
+      </div>
+    </button>
+  );
+}
 
 export default function Home() {
   const [userId, setUserId] = useState(null);
+  const [userName, setUserName] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [visible, setVisible] = useState(false);
   const router = useRouter();
 
-  const check = async () => {
-    const res = await fetch("/api/me", {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-    });
-    const data = await res.json();
-    if (res.status !== 200) {
-      router.push("/login");
-      return;
-    }
-    setUserId(data.userId);
-    setLoading(false);
-  };
-
-  useEffect(() => { check(); }, []);
+  useEffect(() => {
+    const name = sessionStorage.getItem("userName");
+    if (name) setUserName(name);
+    fetch("/api/me", { method: "GET", credentials: "include" })
+      .then(r => r.json().then(d => ({ ok: r.status === 200, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { router.push("/login"); return; }
+        setUserId(d.userId);
+        setLoading(false);
+        setTimeout(() => setVisible(true), 60);
+      })
+      .catch(() => router.push("/login"));
+  }, []);
 
   if (loading) return (
-    <div style={{
-      minHeight: "100vh",
-      background: "linear-gradient(135deg, #0a0a0f 0%, #0d1117 40%, #0a0e1a 100%)",
-      display: "flex", alignItems: "center", justifyContent: "center",
-    }}>
-      <div style={{
-        width: "20px", height: "20px", borderRadius: "50%",
-        border: "2px solid rgba(99,102,241,0.2)",
-        borderTopColor: "#6366f1",
-        animation: "spin 0.8s linear infinite",
-      }} />
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    <div style={{ minHeight: "100vh", background: "hsl(230,60%,3%)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 20, height: 20, borderRadius: "50%", border: "2px solid rgba(124,143,255,0.2)", borderTopColor: "#7C8FFF", animation: "spin 0.8s linear infinite" }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
+  const initials = (userName ?? userId ?? "U").slice(0, 2).toUpperCase();
+  const displayName = userName ?? (userId ? `${userId.slice(0, 8)}…` : "—");
+
   return (
-    
-    <div style={{
-      minHeight: "100vh",
-      background: "linear-gradient(135deg, #0a0a0f 0%, #0d1117 40%, #0a0e1a 100%)",
-      fontFamily: "'DM Sans', system-ui, sans-serif",
-      color: "#e2e8f0",
-      position: "relative",
-      overflow: "hidden",
-    }}>
-      {/* Ambient glow */}
-      <div style={{
-        position: "fixed", inset: 0, pointerEvents: "none",
-        background: "radial-gradient(ellipse 70% 50% at 20% 20%, rgba(99,102,241,0.08) 0%, transparent 60%), radial-gradient(ellipse 50% 40% at 80% 80%, rgba(20,184,166,0.06) 0%, transparent 60%)",
-      }} />
-      <div style={{
-        position: "fixed", inset: 0, pointerEvents: "none",
-        backgroundImage: "linear-gradient(rgba(99,102,241,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(99,102,241,0.03) 1px, transparent 1px)",
-        backgroundSize: "60px 60px",
-      }} />
+    <div style={{ minHeight: "100vh", background: "radial-gradient(ellipse 140% 70% at 50% -10%, rgba(50,70,200,0.20) 0%, transparent 60%), hsl(230,60%,3%)", color: C.text, position: "relative", overflowX: "hidden" }}>
+      <ParticleCanvas />
+
+      {/* Orbs */}
+      <div style={{ position: "fixed", top: "-20%", left: "-10%", width: 600, height: 600, borderRadius: "50%", background: "hsl(231,65%,50%)", opacity: 0.15, filter: "blur(120px)", pointerEvents: "none", zIndex: 0 }} />
+      <div style={{ position: "fixed", bottom: "-20%", right: "-10%", width: 500, height: 500, borderRadius: "50%", background: "hsl(180,70%,40%)", opacity: 0.11, filter: "blur(120px)", pointerEvents: "none", zIndex: 0 }} />
 
       {/* Navbar */}
-      <nav style={{
-        position: "relative", zIndex: 1,
-        padding: "18px 32px",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        borderBottom: "1px solid rgba(99,102,241,0.1)",
-        background: "rgba(10,10,15,0.6)", backdropFilter: "blur(20px)",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <div style={{
-            width: "34px", height: "34px", borderRadius: "10px",
-            background: "linear-gradient(135deg, #6366f1, #14b8a6)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: "0 0 16px rgba(99,102,241,0.35)",
-          }}>
-            <Video style={{ width: "16px", height: "16px", color: "white" }} />
+      <nav style={{ position: "relative", zIndex: 10, padding: "13px 32px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.07)", background: C.navBg, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 10, background: "linear-gradient(135deg,#5c6fd4,#3a8fc7)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 18px rgba(92,111,212,0.45)" }}>
+            <Lock size={15} color="white" />
           </div>
-          <span style={{ fontSize: "16px", fontWeight: "800", color: "#f1f5f9", letterSpacing: "-0.02em" }}>
-            WhiteRoom
-          </span>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#fff", letterSpacing: "-0.03em", lineHeight: 1 }}>WhiteRoom</div>
+            <div style={{ fontSize: 8, fontFamily: "ui-monospace,monospace", letterSpacing: "0.18em", color: C.hint, textTransform: "uppercase" }}>E2E Encrypted</div>
+          </div>
         </div>
-
-        {/* User badge */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: "8px",
-          padding: "6px 12px", borderRadius: "10px",
-          background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.07)",
-        }}>
-          <div style={{
-            width: "24px", height: "24px", borderRadius: "8px",
-            background: "linear-gradient(135deg, #6366f1, #4f46e5)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: "11px", fontWeight: "700", color: "white",
-          }}>
-
-
-
-
-            
-            {userId?.charAt(0)?.toUpperCase() ?? "U"}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 14px 7px 8px", borderRadius: 12, background: C.cardBg, border: `1px solid ${C.cardBorder}` }}>
+            <div style={{ width: 28, height: 28, borderRadius: 8, background: "linear-gradient(135deg,#7C8FFF,#4DD9DC)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: "#fff" }}>
+              {initials}
+            </div>
+            <span style={{ fontSize: 12, fontFamily: "ui-monospace,monospace", color: C.muted }}>{displayName}</span>
           </div>
-          <span style={{ fontSize: "12px", fontWeight: "500", color: "#64748b", fontFamily: "monospace" }}>
-            {userId ? `${userId.slice(0, 8)}...` : "—"}
-          </span>
           <LogoutButton variant="icon" />
         </div>
       </nav>
 
-      {/* Content */}
+      {/* Main */}
       <main style={{
-        position: "relative", zIndex: 1,
-        maxWidth: "680px", margin: "0 auto",
-        padding: "60px 24px",
+        position: "relative", zIndex: 10,
+        maxWidth: 780, margin: "0 auto",
+        padding: "28px 24px 60px",
+        opacity: visible ? 1 : 0,
+        transform: visible ? "none" : "translateY(28px)",
+        transition: "opacity 0.8s cubic-bezier(.16,1,.3,1), transform 0.8s cubic-bezier(.16,1,.3,1)",
       }}>
-        {/* Hero */}
-        <div style={{ marginBottom: "48px" }}>
-          <div style={{
-            display: "inline-flex", alignItems: "center", gap: "6px",
-            padding: "5px 12px", borderRadius: "20px", marginBottom: "20px",
-            background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)",
-          }}>
-            <Zap style={{ width: "11px", height: "11px", color: "#818cf8" }} />
-            <span style={{ fontSize: "11px", fontWeight: "600", color: "#818cf8", letterSpacing: "0.04em" }}>
-              END-TO-END ENCRYPTED
-            </span>
-          </div>
-          <h1 style={{
-            fontSize: "38px", fontWeight: "900", color: "#f1f5f9",
-            margin: "0 0 12px", letterSpacing: "-0.04em", lineHeight: 1.1,
-          }}>
-            Your rooms,<br />
-            <span style={{ background: "linear-gradient(135deg, #6366f1, #14b8a6)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-              your call.
-            </span>
-          </h1>
-          <p style={{ fontSize: "15px", color: "#64748b", margin: 0, lineHeight: 1.6, maxWidth: "400px" }}>
-            Create a private encrypted room or join one. No accounts, no tracking — just secure collaboration.
-          </p>
+
+        {/* Badge */}
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "5px 14px", borderRadius: 20, marginBottom: 16, background: "rgba(124,143,255,0.10)", border: "1px solid rgba(124,143,255,0.22)" }}>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.indigo, boxShadow: `0 0 6px ${C.indigo}`, animation: "pulse 2s ease-in-out infinite" }} />
+          <span style={{ fontSize: 10, fontWeight: 700, color: C.indigo, letterSpacing: "0.12em", fontFamily: "ui-monospace,monospace" }}>END-TO-END ENCRYPTED</span>
         </div>
+
+        {/* Headline */}
+        <h1 style={{ fontSize: "clamp(42px,6.5vw,72px)", fontWeight: 800, letterSpacing: "-0.05em", lineHeight: 0.94, marginBottom: 16, color: "#fff" }}>
+          Your rooms,<br />
+          <span style={gradText}>your call.</span>
+        </h1>
+
+        <p style={{ fontSize: 14, fontFamily: "ui-monospace,monospace", color: C.muted, lineHeight: 1.8, marginBottom: 32, maxWidth: 420, fontWeight: 300 }}>
+          Create a private encrypted room or join one instantly.
+          No tracking, no logs — just secure collaboration.
+        </p>
 
         {/* Action cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginBottom: "40px" }}>
-          {/* Create */}
-          <button
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 28 }}>
+          <ActionCard
             onClick={() => router.push("/create")}
-            style={{
-              padding: "28px 24px", borderRadius: "18px", border: "none", cursor: "pointer", textAlign: "left",
-              background: "rgba(13,15,23,0.9)", backdropFilter: "blur(24px)",
-              border: "1px solid rgba(99,102,241,0.2)",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-              transition: "all 0.2s", fontFamily: "inherit",
-            }}
-            onMouseEnter={e => {
-
-              
-              e.currentTarget.style.borderColor = "rgba(99,102,241,0.45)";
-              e.currentTarget.style.transform = "translateY(-2px)";
-              e.currentTarget.style.boxShadow = "0 16px 40px rgba(0,0,0,0.5), 0 0 24px rgba(99,102,241,0.12)";
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderColor = "rgba(99,102,241,0.2)";
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)";
-            }}
-          >
-            <div style={{
-              width: "42px", height: "42px", borderRadius: "12px",
-              background: "linear-gradient(135deg, #6366f1, #4f46e5)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              marginBottom: "16px",
-              boxShadow: "0 4px 16px rgba(99,102,241,0.35)",
-            }}>
-              <Plus style={{ width: "20px", height: "20px", color: "white" }} />
-            </div>
-            <div style={{ fontSize: "16px", fontWeight: "700", color: "#f1f5f9", marginBottom: "6px", letterSpacing: "-0.02em" }}>
-              Create Room
-            </div>
-            <div style={{ fontSize: "13px", color: "#64748b", lineHeight: 1.4 }}>
-              Start a new encrypted session and invite others
-            </div>
-          </button>
-
-          {/* Join */}
-          <button
+            accentColor="#7C8FFF" accentRgb="124,143,255"
+            gradFrom="#5c6fd4" gradTo="#3a4fc8"
+            icon={<Plus size={22} color="white" />}
+            title="Create Room"
+            desc="Start a new encrypted session and invite your team"
+            badge="New session"
+            badgeColor="rgba(124,143,255,0.15)" badgeTextColor={C.indigo} badgeBorder="rgba(124,143,255,0.25)"
+          />
+          <ActionCard
             onClick={() => router.push("/join")}
-            style={{
-              padding: "28px 24px", borderRadius: "18px", border: "none", cursor: "pointer", textAlign: "left",
-              background: "rgba(13,15,23,0.9)", backdropFilter: "blur(24px)",
-              border: "1px solid rgba(20,184,166,0.2)",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-              transition: "all 0.2s", fontFamily: "inherit",
-            }}
-            onMouseEnter={e => {
-              e.currentTarget.style.borderColor = "rgba(20,184,166,0.45)";
-              e.currentTarget.style.transform = "translateY(-2px)";
-              e.currentTarget.style.boxShadow = "0 16px 40px rgba(0,0,0,0.5), 0 0 24px rgba(20,184,166,0.1)";
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderColor = "rgba(20,184,166,0.2)";
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)";
-            }}
-          >
-            <div style={{
-              width: "42px", height: "42px", borderRadius: "12px",
-              background: "linear-gradient(135deg, #14b8a6, #0d9488)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              marginBottom: "16px",
-              boxShadow: "0 4px 16px rgba(20,184,166,0.3)",
-            }}>
-              <Hash style={{ width: "20px", height: "20px", color: "white" }} />
-            </div>
-            <div style={{ fontSize: "16px", fontWeight: "700", color: "#f1f5f9", marginBottom: "6px", letterSpacing: "-0.02em" }}>
-              Join Room
-            </div>
-            <div style={{ fontSize: "13px", color: "#64748b", lineHeight: 1.4 }}>
-              Enter a room code to join an existing session
-            </div>
-          </button>
+            accentColor="#4DD9DC" accentRgb="77,217,220"
+            gradFrom="#14b8c8" gradTo="#0a8f9e"
+            icon={<Hash size={22} color="white" />}
+            title="Join Room"
+            desc="Enter a room code to join an existing session"
+            badge="Have a code?"
+            badgeColor="rgba(77,217,220,0.12)" badgeTextColor={C.teal} badgeBorder="rgba(77,217,220,0.25)"
+          />
         </div>
 
-        {/* Feature pills */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+        {/* Stats row */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 28 }}>
           {[
-            { icon: Lock, label: "AES Encrypted Chat" },
-            { icon: Video, label: "WebRTC Video" },
-            { icon: Users, label: "Multi-user Rooms" },
-          ].map(({ icon: Icon, label }) => (
-            <div key={label} style={{
-              display: "flex", alignItems: "center", gap: "6px",
-              padding: "6px 14px", borderRadius: "20px",
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid rgba(255,255,255,0.07)",
-            }}>
-              <Icon style={{ width: "12px", height: "12px", color: "#475569" }} />
-              <span style={{ fontSize: "12px", color: "#475569", fontWeight: "500" }}>{label}</span>
+            { value: "AES-256", label: "Encryption standard", color: C.indigo },
+            { value: "WebRTC", label: "Peer-to-peer video", color: C.teal },
+            { value: "0 logs", label: "Zero data stored", color: C.purple },
+          ].map(s => (
+            <div key={s.value} style={{ borderRadius: 14, background: C.cardBg, border: `1px solid ${C.cardBorder}`, padding: "16px 18px", backdropFilter: "blur(16px)" }}>
+              <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: "-0.03em", color: s.color, marginBottom: 4 }}>{s.value}</div>
+              <div style={{ fontSize: 11, fontFamily: "ui-monospace,monospace", color: C.muted }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Pills */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {[
+            { Icon: Shield, label: "AES Encrypted Chat" },
+            { Icon: Video, label: "WebRTC Video" },
+            { Icon: Users, label: "Multi-user Rooms" },
+            { Icon: Zap, label: "Zero Latency" },
+            { Icon: Lock, label: "No Data Retention" },
+          ].map(({ Icon, label }) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 14px", borderRadius: 20, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
+              <Icon size={11} color={C.hint} />
+              <span style={{ fontSize: 11, fontFamily: "ui-monospace,monospace", color: C.muted }}>{label}</span>
             </div>
           ))}
         </div>
       </main>
 
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+        * { box-sizing: border-box; }
+      `}</style>
     </div>
-    
   );
 }
