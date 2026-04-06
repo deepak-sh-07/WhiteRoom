@@ -17,13 +17,13 @@ export default function ParticleCanvas() {
 
     const mouse = { x: -999, y: -999 };
 
-    const pts = Array.from({ length: 90 }, () => ({
+    const pts = Array.from({ length: 200 }, () => ({
       x: Math.random() * canvas.width,
       y: Math.random() * canvas.height,
       vx: (Math.random() - 0.5) * 0.18,
       vy: (Math.random() - 0.5) * 0.18,
-      r: Math.random() * 1.5 + 0.3,
-      a: Math.random() * 0.5 + 0.06,
+      r: Math.random() * 3 + 0.8,
+      a: Math.random() * 0.6 + 0.12,
       hue: Math.random() > 0.5 ? 231 : 180,
     }));
 
