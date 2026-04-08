@@ -30,7 +30,7 @@ export default function Room() {
   const [role, setRole]                   = useState(null);
   const [msg, setMsg]                     = useState("");
   const [users, setUsers]                 = useState([]);
-  const [messages, setMessages]           = useState([]);
+  const [messages, setMessages]           = useState([]);   // ephemeral — in-memory only
   const [remoteStreams, setRemoteStreams]  = useState({});
   const [allPeerIds, setAllPeerIds]       = useState([]);
   const [isChatOpen, setIsChatOpen]       = useState(false);
@@ -40,11 +40,11 @@ export default function Room() {
   const [isCameraOn, setIsCameraOn]       = useState(true);
   const [view, setView]                   = useState("video");
 
-  // ── Waiting room state ────────────────────────────────────────
-  const [waitStatus, setWaitStatus]     = useState("idle"); // "idle"|"waiting"|"admitted"|"rejected"
-  const [joinRequests, setJoinRequests] = useState([]);     // host sees these { requestId, peerId, name }
+  // ── Waiting room state ──
+  const [waitStatus, setWaitStatus]     = useState("idle");
+  const [joinRequests, setJoinRequests] = useState([]);
 
-  // ── Stable refs (never stale) ──
+  // ── Stable refs ──
   const roomIdRef      = useRef(roomId);
   const localStreamRef = useRef(null);
   const localVideoRef  = useRef(null);
@@ -58,7 +58,6 @@ export default function Room() {
   const ydocRef        = useRef(null);
   const awarenessRef   = useRef(null);
 
-  // ── Track if join-request already sent to prevent duplicates ──
   const joinRequestSentRef = useRef(false);
 
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
@@ -72,7 +71,6 @@ export default function Room() {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = s;
       if (localVideoRef.current) localVideoRef.current.srcObject = s;
-      console.log("[media] got stream tracks:", s.getTracks().map(t => t.kind));
       return s;
     } catch (e) {
       console.warn("[media] failed:", e.message);
@@ -81,7 +79,7 @@ export default function Room() {
   };
 
   // ══════════════════════════════════════════
-  //  CREATE RTCPeerConnection  (full-mesh)
+  //  CREATE RTCPeerConnection
   // ══════════════════════════════════════════
   const makePc = async (peerId) => {
     if (pcsRef.current[peerId]) return pcsRef.current[peerId];
@@ -96,15 +94,9 @@ export default function Room() {
     pcsRef.current[peerId] = pc;
 
     const stream = localStreamRef.current;
-    if (stream) {
-      stream.getTracks().forEach(t => {
-        pc.addTrack(t, stream);
-        console.log(`[pc:${peerId}] addTrack ${t.kind}`);
-      });
-    }
+    if (stream) stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
     pc.ontrack = ({ track, streams }) => {
-      console.log(`[pc:${peerId}] ✅ ontrack ${track.kind}`);
       setRemoteStreams(prev => {
         const ms = prev[peerId] ?? new MediaStream();
         if (!ms.getTracks().find(t => t.id === track.id)) ms.addTrack(track);
@@ -116,14 +108,8 @@ export default function Room() {
       if (candidate) socket.emit("ice-candidate", { roomId: roomIdRef.current, candidate, targetId: peerId });
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[pc:${peerId}] ICE: ${pc.iceConnectionState}`);
-      setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
-    };
-    pc.onconnectionstatechange = () => {
-      console.log(`[pc:${peerId}] PC:  ${pc.connectionState}`);
-      setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
-    };
+    pc.oniceconnectionstatechange = () => setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
+    pc.onconnectionstatechange    = () => setPeerStates(prev => ({ ...prev, [peerId]: pc.connectionState }));
 
     pc.ondatachannel = ({ channel }) => {
       dcsRef.current[peerId] = channel;
@@ -139,7 +125,6 @@ export default function Room() {
   // ══════════════════════════════════════════
   const bindDc = (channel, peerId) => {
     channel.onopen = async () => {
-      console.log(`[dc:${peerId}] open`);
       roomKeysRef.current[peerId] = await generateRoomKey();
       rsaKeysRef.current[peerId]  = await generateRSAKeyPair();
       const pub = await exportPublicKey(rsaKeysRef.current[peerId].publicKey);
@@ -148,11 +133,7 @@ export default function Room() {
     };
     channel.onmessage = e => onDcMessage(e.data, peerId);
     channel.onclose   = () => console.warn(`[dc:${peerId}] closed`);
-    channel.onerror   = e => {
-      const msg = e?.message ?? e?.error?.message ?? "unknown";
-      const state = dcsRef.current[peerId]?.readyState ?? "n/a";
-      console.warn(`[dc:${peerId}] error — readyState: ${state}, msg: ${msg}`);
-    };
+    channel.onerror   = e => console.warn(`[dc:${peerId}] error`, e?.message);
   };
 
   const DC_MAX_BYTES = 200_000;
@@ -162,17 +143,10 @@ export default function Room() {
     if (!ch || ch.readyState !== "open") return;
     try {
       const raw = JSON.stringify({ type, payload, ts: Date.now() });
-      if (raw.length > DC_MAX_BYTES) {
-        console.warn(`[dc:${peerId}] message too large (${raw.length} bytes), type=${type} — dropping`);
-        return;
-      }
-      if (ch.bufferedAmount > DC_MAX_BYTES) {
-        console.warn(`[dc:${peerId}] buffer full (${ch.bufferedAmount}), dropping type=${type}`);
-        return;
-      }
+      if (raw.length > DC_MAX_BYTES || ch.bufferedAmount > DC_MAX_BYTES) return;
       ch.send(raw);
     } catch (err) {
-      console.warn(`[dc:${peerId}] send failed (${type}):`, err?.message ?? err);
+      console.warn(`[dc:${peerId}] send failed (${type}):`, err?.message);
     }
   };
 
@@ -196,13 +170,23 @@ export default function Room() {
 
     switch (msg.type) {
       case "chat": {
+        // Chat is ephemeral — stored in React state only, never persisted
         if (!key) return;
         try {
           const d = await decrypt(key, msg.payload);
-          setMessages(prev => [...prev, { sender: d.sender, text: d.text, timestamp: msg.ts }]);
+          const newMsg = {
+            id: d.id ?? `${peerId}-${msg.ts}`,
+            sender: d.sender,
+            text: d.text,
+            timestamp: msg.ts,
+          };
+          setMessages(prev =>
+            prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg]
+          );
         } catch (e) { console.error("chat decrypt", e); }
         break;
       }
+
       case "control": {
         if (msg.payload.action === "PUBLIC_KEY") {
           peerPubKeysRef.current[peerId] = await importPublicKey(msg.payload.key);
@@ -219,6 +203,7 @@ export default function Room() {
           if (ydocRef.current) {
             const fullState = Y.encodeStateAsUpdate(ydocRef.current);
             const k = roomKeysRef.current[peerId];
+            // Syncs docs + whiteboard state — chat intentionally excluded
             if (k && fullState.length > 0) {
               sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
             }
@@ -226,6 +211,7 @@ export default function Room() {
         }
         break;
       }
+
       case "awareness": {
         const { clientId, state } = msg.payload;
         if (!awarenessRef.current) break;
@@ -233,20 +219,20 @@ export default function Room() {
         setUsers(Array.from(awarenessRef.current.states.entries()).map(([id, s]) => ({
           clientId: id, role: s.user?.role ?? "?", name: s.user?.name ?? "?",
           color: s.user?.color ?? "#a78bfa", isLocal: id === ydocRef.current?.clientID,
-          canvasCursor: s.cursor ?? null,
-          docCursor: s.docCursor ?? null,
-          lastActive: s.lastActive ?? null,
-          socketId: s.socketId ?? null,
-          micOn: s.micOn ?? true,
-          cameraOn: s.cameraOn ?? true,
+          canvasCursor: s.cursor ?? null, docCursor: s.docCursor ?? null,
+          lastActive: s.lastActive ?? null, socketId: s.socketId ?? null,
+          micOn: s.micOn ?? true, cameraOn: s.cameraOn ?? true,
         })));
         break;
       }
+
       case "whiteboard-update": {
         if (ydocRef.current?._whiteboardApply) await ydocRef.current._whiteboardApply(msg.payload);
         break;
       }
+
       case "yjs-update": {
+        // Applies docs + whiteboard updates — chat is not in the Yjs doc
         if (!key) return;
         try {
           const d = await decrypt(key, msg.payload);
@@ -259,6 +245,7 @@ export default function Room() {
 
   // ══════════════════════════════════════════
   //  YJS + INDEXEDDB PERSISTENCE
+  //  (docs + whiteboard only — chat excluded)
   // ══════════════════════════════════════════
   const idbRef = useRef(null);
 
@@ -296,7 +283,7 @@ export default function Room() {
   }, []);
 
   // ══════════════════════════════════════════
-  //  SOCKET / SIGNALING  — full mesh
+  //  SOCKET / SIGNALING
   // ══════════════════════════════════════════
   useEffect(() => {
     if (!roomId) return;
@@ -306,14 +293,10 @@ export default function Room() {
       if (!s) return;
       const senders = pc.getSenders();
       s.getTracks().forEach(t => {
-        if (!senders.find(sx => sx.track?.id === t.id)) {
-          pc.addTrack(t, s);
-          console.log(`[signaling] late-addTrack ${t.kind}`);
-        }
+        if (!senders.find(sx => sx.track?.id === t.id)) pc.addTrack(t, s);
       });
     };
 
-    // ── Emit join-request exactly once per connection ─────────────
     const emitJoinRequest = () => {
       if (joinRequestSentRef.current) return;
       joinRequestSentRef.current = true;
@@ -322,21 +305,17 @@ export default function Room() {
         const cur = awarenessRef.current.getLocalState() ?? {};
         awarenessRef.current.setLocalState({ ...cur, socketId: socket.id, micOn: true, cameraOn: true });
       }
-      console.log("[signaling] emitting join-request for room:", roomId);
       socket.emit("join-request", { roomId, name });
     };
 
     const onConnect = () => {
-      console.log("[signaling] connected");
       setConnected(true);
       setWaitStatus("waiting");
-      // Reset the sent flag on fresh connect so reconnects work
       joinRequestSentRef.current = false;
       emitJoinRequest();
     };
 
     const onRoomPeers = async ({ peers }) => {
-      console.log("[signaling] room-peers:", peers);
       await getMedia();
       for (const peerId of peers) {
         const pc = await makePc(peerId);
@@ -346,47 +325,34 @@ export default function Room() {
         bindDc(dc, peerId);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        console.log(`[signaling] → offer to ${peerId}`);
         socket.emit("offer", { roomId, offer, targetId: peerId });
       }
     };
 
-    const onPeerJoined = async ({ peerId }) => {
-      console.log(`[signaling] peer-joined: ${peerId}`);
-      await getMedia();
-    };
+    const onPeerJoined = async ({ peerId }) => { await getMedia(); };
 
     const onOffer = async ({ offer, fromId }) => {
-      console.log(`[signaling] ← offer from ${fromId}`);
       await getMedia();
       const existing = pcsRef.current[fromId];
       if (existing && existing.signalingState !== "stable") {
-        console.log(`[signaling] closing stale PC for ${fromId} (was ${existing.signalingState})`);
         existing.close();
         delete pcsRef.current[fromId];
       }
       const pc = await makePc(fromId);
       addTracksTo(pc);
       await pc.setRemoteDescription(offer);
-      for (const c of (pendingIceRef.current[fromId] ?? [])) {
-        await pc.addIceCandidate(c).catch(() => {});
-      }
+      for (const c of (pendingIceRef.current[fromId] ?? [])) await pc.addIceCandidate(c).catch(() => {});
       pendingIceRef.current[fromId] = [];
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      console.log(`[signaling] → answer to ${fromId}`);
       socket.emit("answer", { roomId, answer, targetId: fromId });
     };
 
     const onAnswer = async ({ answer, fromId }) => {
-      console.log(`[signaling] ← answer from ${fromId}`);
       const pc = pcsRef.current[fromId];
-      if (!pc) return console.warn(`[signaling] no PC for ${fromId}`);
-      if (pc.signalingState !== "have-local-offer") return console.warn(`[signaling] wrong state ${pc.signalingState}`);
+      if (!pc || pc.signalingState !== "have-local-offer") return;
       await pc.setRemoteDescription(answer);
-      for (const c of (pendingIceRef.current[fromId] ?? [])) {
-        await pc.addIceCandidate(c).catch(() => {});
-      }
+      for (const c of (pendingIceRef.current[fromId] ?? [])) await pc.addIceCandidate(c).catch(() => {});
       pendingIceRef.current[fromId] = [];
     };
 
@@ -401,7 +367,6 @@ export default function Room() {
     };
 
     const onPeerLeft = ({ peerId }) => {
-      console.log(`[signaling] peer-left: ${peerId}`);
       pcsRef.current[peerId]?.close();
       delete pcsRef.current[peerId];
       delete dcsRef.current[peerId];
@@ -411,10 +376,7 @@ export default function Room() {
       setPeerStates(p => { const n = { ...p }; delete n[peerId]; return n; });
       if (awarenessRef.current) {
         for (const [clientId, state] of awarenessRef.current.states.entries()) {
-          if (state?.socketId === peerId) {
-            awarenessRef.current.states.delete(clientId);
-            break;
-          }
+          if (state?.socketId === peerId) { awarenessRef.current.states.delete(clientId); break; }
         }
       }
       setUsers(prev => prev.filter(u => u.isLocal || u.socketId !== peerId));
@@ -430,42 +392,28 @@ export default function Room() {
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
 
-    const onAdmitted = () => {
-      console.log("[signaling] admitted to room");
-      setWaitStatus("admitted");
-      playJoinSound();
-    };
-
-    const onRejected = () => {
-      console.log("[signaling] rejected by host");
-      setWaitStatus("rejected");
-    };
-
+    const onAdmitted  = () => { setWaitStatus("admitted"); playJoinSound(); };
+    const onRejected  = () => setWaitStatus("rejected");
     const onJoinRequest = ({ requestId, peerId, name }) => {
-      setJoinRequests(prev => {
-        // Prevent duplicate cards for same requestId
-        if (prev.find(r => r.requestId === requestId)) return prev;
-        return [...prev, { requestId, peerId, name }];
-      });
+      setJoinRequests(prev => prev.find(r => r.requestId === requestId) ? prev : [...prev, { requestId, peerId, name }]);
       playKnockSound();
     };
 
     const onReconnect = async () => {
-      console.log("[signaling] reconnected — re-syncing Yjs state to peers");
+      console.log("[signaling] reconnected — re-syncing Yjs state (docs + whiteboard) to peers");
       if (!ydocRef.current) return;
       const fullState = Y.encodeStateAsUpdate(ydocRef.current);
       for (const id of Object.keys(dcsRef.current)) {
         const k = roomKeysRef.current[id];
-        if (k && fullState.length > 0) {
-          sendTo(id, "yjs-update", await encrypt(k, Array.from(fullState)));
-        }
+        // Chat is intentionally NOT included — only docs + whiteboard sync
+        if (k && fullState.length > 0) sendTo(id, "yjs-update", await encrypt(k, Array.from(fullState)));
       }
       broadcastAwareness();
     };
 
     socket.on("connect",       onConnect);
     socket.on("reconnect",     onReconnect);
-    socket.on("disconnect",    () => { setConnected(false); console.warn("[signaling] disconnected"); });
+    socket.on("disconnect",    () => setConnected(false));
     socket.on("join-admitted", onAdmitted);
     socket.on("join-rejected", onRejected);
     socket.on("join-request",  onJoinRequest);
@@ -478,10 +426,6 @@ export default function Room() {
     socket.on("ice-candidate", onIce);
     socket.on("peer-left",     onPeerLeft);
 
-    // ── Connect or emit join-request if already connected ─────────
-    // Key fix: never emit join-request in two places.
-    // onConnect handles fresh connects, emitJoinRequest handles
-    // the case where socket was already connected before this effect ran.
     if (socket.connected) {
       setConnected(true);
       setWaitStatus("waiting");
@@ -514,7 +458,6 @@ export default function Room() {
     };
   }, [roomId]);
 
-  // Re-attach local video when switching views
   useEffect(() => {
     if (view === "video" && localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
@@ -525,11 +468,17 @@ export default function Room() {
   //  HANDLERS
   // ══════════════════════════════════════════
   const sendEncryptedChat = async (text) => {
-    const message = { text, sender: roleRef.current ?? "?", timestamp: Date.now() };
+    // Chat is ephemeral — stored in React state only, not persisted to Yjs/IndexedDB
+    const id = `${socket.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const message = { id, text, sender: roleRef.current ?? "?", timestamp: Date.now() };
+
+    // Add to local React state immediately
     setMessages(p => [...p, message]);
-    for (const id of Object.keys(dcsRef.current)) {
-      const k = roomKeysRef.current[id];
-      if (k) sendTo(id, "chat", await encrypt(k, message));
+
+    // Encrypt and send to all connected peers
+    for (const peerId of Object.keys(dcsRef.current)) {
+      const k = roomKeysRef.current[peerId];
+      if (k) sendTo(peerId, "chat", await encrypt(k, message));
     }
   };
 
@@ -560,23 +509,18 @@ export default function Room() {
     if (isCameraOn) {
       const realTrack = stream.getVideoTracks()[0];
       if (!realTrack) { setIsCameraOn(false); return; }
-
       realTrackRef.current = realTrack;
-
       const canvas = Object.assign(document.createElement("canvas"), { width: 640, height: 480 });
       canvas.getContext("2d").fillRect(0, 0, 640, 480);
       const blackTrack = canvas.captureStream(0).getVideoTracks()[0];
       blackTrackRef.current = blackTrack;
-
       for (const pc of Object.values(pcsRef.current)) {
         const sender = pc.getSenders().find(s => s.track?.kind === "video");
         if (sender) await sender.replaceTrack(blackTrack);
       }
-
       stream.removeTrack(realTrack);
       stream.addTrack(blackTrack);
       realTrack.stop();
-
       setIsCameraOn(false);
       if (awarenessRef.current) {
         const cur = awarenessRef.current.getLocalState() ?? {};
@@ -587,31 +531,22 @@ export default function Room() {
       try {
         const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
         const newTrack = newStream.getVideoTracks()[0];
-
         for (const pc of Object.values(pcsRef.current)) {
           const sender = pc.getSenders().find(s => s.track?.kind === "video");
           if (sender) await sender.replaceTrack(newTrack);
         }
-
         const blackTrack = blackTrackRef.current;
-        if (blackTrack) {
-          stream.removeTrack(blackTrack);
-          blackTrack.stop();
-        }
+        if (blackTrack) { stream.removeTrack(blackTrack); blackTrack.stop(); }
         stream.addTrack(newTrack);
         realTrackRef.current = newTrack;
-
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-
         setIsCameraOn(true);
         if (awarenessRef.current) {
           const cur = awarenessRef.current.getLocalState() ?? {};
           awarenessRef.current.setLocalState({ ...cur, cameraOn: true });
           broadcastAwareness();
         }
-      } catch (err) {
-        console.error("[camera] failed to re-acquire camera", err);
-      }
+      } catch (err) { console.error("[camera] failed to re-acquire", err); }
     }
   };
 
@@ -659,10 +594,8 @@ export default function Room() {
     router.push("/");
   };
 
-  // ── Approve / reject — guarded against double clicks ─────────
   const approveJoin = (requestId) => {
     setJoinRequests(prev => {
-      // If already removed, do nothing (double click guard)
       if (!prev.find(r => r.requestId === requestId)) return prev;
       socket.emit("join-approve", { requestId });
       return prev.filter(r => r.requestId !== requestId);
@@ -677,7 +610,7 @@ export default function Room() {
     });
   };
 
-  // ── Waiting screen ────────────────────────────────────────────
+  // ── Waiting screen ──
   if (waitStatus === "waiting") {
     return (
       <div onClick={unlockAudio} style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
@@ -701,7 +634,7 @@ export default function Room() {
     );
   }
 
-  // ── Rejected screen ───────────────────────────────────────────
+  // ── Rejected screen ──
   if (waitStatus === "rejected") {
     return (
       <div style={{ width: "100vw", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif" }}>
@@ -713,10 +646,7 @@ export default function Room() {
             <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#f1f5f9", margin: "0 0 8px" }}>Entry denied</h2>
             <p style={{ fontSize: "13px", color: "#475569", margin: 0 }}>The host declined your request to join</p>
           </div>
-          <button
-            onClick={() => window.history.back()}
-            style={{ padding: "10px 24px", borderRadius: "10px", border: "none", background: "rgba(99,102,241,.15)", color: "#818cf8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}
-          >
+          <button onClick={() => window.history.back()} style={{ padding: "10px 24px", borderRadius: "10px", border: "none", background: "rgba(99,102,241,.15)", color: "#818cf8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}>
             Go back
           </button>
         </div>
@@ -731,7 +661,6 @@ export default function Room() {
     <div className="relative w-full h-screen overflow-hidden flex flex-col"
          style={{ background: "linear-gradient(135deg,#0a0a0f,#0d1117 40%,#0a0e1a)", fontFamily: "'DM Sans',system-ui,sans-serif", color: "#e2e8f0" }}>
 
-      {/* Background glow */}
       <div className="fixed inset-0 pointer-events-none z-0"
            style={{ background: "radial-gradient(ellipse 80% 50% at 20% 20%,rgba(99,102,241,.07),transparent 60%),radial-gradient(ellipse 60% 40% at 80% 80%,rgba(20,184,166,.06),transparent 60%)" }} />
 
@@ -753,7 +682,7 @@ export default function Room() {
           >
             <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: "#eab308", boxShadow: "0 0 6px #eab308" }} />
             <span style={{ fontSize: "12px", fontWeight: "600", color: "#eab308" }}>
-              You're offline — edits are saved locally and will sync when you reconnect
+              You're offline — whiteboard & doc edits are saved locally and will sync when you reconnect
             </span>
           </motion.div>
         )}
@@ -812,41 +741,22 @@ export default function Room() {
           <div className="flex-1 relative overflow-hidden"
                style={{ background: "rgba(10,10,15,.6)", backdropFilter: "blur(12px)", borderLeft: "1px solid rgba(99,102,241,.1)", borderRight: "1px solid rgba(99,102,241,.1)" }}>
 
-            {/* Video grid */}
             <AnimatePresence mode="wait">
               {view === "video" && (
-                <motion.div
-                  key="video"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
+                <motion.div key="video" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
                   style={{
                     position: "absolute", inset: 0, padding: "10px",
                     display: "grid", gap: "10px",
                     gridTemplateColumns: allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr 1fr" : allPeerIds.length <= 3 ? "1fr 1fr" : "1fr 1fr 1fr",
-                    gridTemplateRows:    allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr" : "1fr 1fr",
+                    gridTemplateRows: allPeerIds.length === 0 ? "1fr" : allPeerIds.length === 1 ? "1fr" : "1fr 1fr",
                   }}
                 >
                   <VideoTile videoRef={localVideoRef} isLocal isCameraOn={isCameraOn} isMicOn={isMicOn} label={`You · ${role}`} variant="local" />
                   {allPeerIds.map((peerId, idx) => {
                     const peerUser = users.find(u => u.socketId === peerId);
                     return (
-                      <motion.div
-                        key={peerId}
-                        initial={{ opacity: 0, scale: 0.95 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
-                        transition={{ duration: 0.2 }}
-                        style={{ minHeight: 0 }}
-                      >
-                        <VideoTile
-                          stream={remoteStreams[peerId]}
-                          label={peerUser?.name && peerUser.name !== "?" ? peerUser.name : `Peer ${idx + 1}`}
-                          variant="remote"
-                          isCameraOn={peerUser?.cameraOn ?? true}
-                          isMicOn={peerUser?.micOn ?? true}
-                        />
+                      <motion.div key={peerId} initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} transition={{ duration: 0.2 }} style={{ minHeight: 0 }}>
+                        <VideoTile stream={remoteStreams[peerId]} label={peerUser?.name && peerUser.name !== "?" ? peerUser.name : `Peer ${idx + 1}`} variant="remote" isCameraOn={peerUser?.cameraOn ?? true} isMicOn={peerUser?.micOn ?? true} />
                       </motion.div>
                     );
                   })}
@@ -854,7 +764,6 @@ export default function Room() {
               )}
             </AnimatePresence>
 
-            {/* Whiteboard */}
             <AnimatePresence mode="wait">
               {view === "whiteboard" && (
                 <motion.div key="whiteboard" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} style={{ position: "absolute", inset: 0, zIndex: 2 }}>
@@ -863,7 +772,6 @@ export default function Room() {
               )}
             </AnimatePresence>
 
-            {/* Docs */}
             <AnimatePresence mode="wait">
               {view === "docs" && (
                 <motion.div key="docs" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} style={{ position: "absolute", inset: 0, zIndex: 2 }}>
@@ -877,17 +785,9 @@ export default function Room() {
 
           </div>
 
-          {/* ── Presence Sidebar ── */}
           <AnimatePresence>
             {isSidebarOpen && (
-              <motion.div
-                key="sidebar"
-                initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 224, opacity: 1 }}
-                exit={{ width: 0, opacity: 0 }}
-                transition={{ duration: 0.2, ease: "easeInOut" }}
-                style={{ overflow: "hidden", flexShrink: 0 }}
-              >
+              <motion.div key="sidebar" initial={{ width: 0, opacity: 0 }} animate={{ width: 224, opacity: 1 }} exit={{ width: 0, opacity: 0 }} transition={{ duration: 0.2, ease: "easeInOut" }} style={{ overflow: "hidden", flexShrink: 0 }}>
                 <PresenceSidebar users={users} peerStates={peerStates} onClose={() => setIsSidebarOpen(false)} />
               </motion.div>
             )}
@@ -906,33 +806,15 @@ export default function Room() {
 
       </div>
 
-      {/* ── Floating Chat ── */}
-      <ChatPanel
-        isOpen={isChatOpen}
-        onClose={() => setIsChatOpen(false)}
-        messages={messages}
-        users={users}
-        role={role}
-        onSend={sendEncryptedChat}
-      />
+      <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={messages} users={users} role={role} onSend={sendEncryptedChat} />
 
-      {/* ── Host join-request approval popup ── */}
       <AnimatePresence>
         {joinRequests.length > 0 && (
-          <motion.div
-            key="join-requests"
-            initial={{ x: 60, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 60, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+          <motion.div key="join-requests" initial={{ x: 60, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 60, opacity: 0 }} transition={{ duration: 0.2 }}
             style={{ position: "fixed", bottom: "80px", right: "20px", zIndex: 60, display: "flex", flexDirection: "column", gap: "8px", maxWidth: "300px" }}
           >
             {joinRequests.map(req => (
-              <div key={req.requestId} style={{
-                background: "rgba(13,15,23,.97)", backdropFilter: "blur(24px)",
-                border: "1px solid rgba(99,102,241,.25)", borderRadius: "14px",
-                padding: "14px 16px", boxShadow: "0 8px 32px rgba(0,0,0,.5)",
-              }}>
+              <div key={req.requestId} style={{ background: "rgba(13,15,23,.97)", backdropFilter: "blur(24px)", border: "1px solid rgba(99,102,241,.25)", borderRadius: "14px", padding: "14px 16px", boxShadow: "0 8px 32px rgba(0,0,0,.5)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
                   <div style={{ width: "36px", height: "36px", borderRadius: "10px", flexShrink: 0, background: "rgba(99,102,241,.2)", border: "1px solid rgba(99,102,241,.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px", fontWeight: "800", color: "#818cf8" }}>
                     {req.name.charAt(0).toUpperCase()}
@@ -943,18 +825,8 @@ export default function Room() {
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: "8px" }}>
-                  <button
-                    onClick={() => approveJoin(req.requestId)}
-                    style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(16,185,129,.25)", background: "rgba(16,185,129,.15)", color: "#10b981", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}
-                  >
-                    Admit
-                  </button>
-                  <button
-                    onClick={() => rejectJoin(req.requestId)}
-                    style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.1)", color: "#ef4444", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}
-                  >
-                    Deny
-                  </button>
+                  <button onClick={() => approveJoin(req.requestId)} style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(16,185,129,.25)", background: "rgba(16,185,129,.15)", color: "#10b981", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>Admit</button>
+                  <button onClick={() => rejectJoin(req.requestId)} style={{ flex: 1, padding: "8px", borderRadius: "8px", border: "1px solid rgba(239,68,68,.2)", background: "rgba(239,68,68,.1)", color: "#ef4444", fontSize: "12px", fontWeight: "700", cursor: "pointer" }}>Deny</button>
                 </div>
               </div>
             ))}
