@@ -9,17 +9,18 @@ import { IndexeddbPersistence } from "y-indexeddb";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { playJoinSound, playLeaveSound, playKnockSound, unlockAudio } from "@/lib/sounds";
-import { Lock, Shield, MessageSquare, Users, X } from 'lucide-react';
+import { Lock, Shield, MessageSquare, Users, X, Sparkles } from 'lucide-react';
 const WhiteboardPanel = dynamic(() => import("@/components/WhiteboardPanel").then(m => m.WhiteboardPanel), { ssr: false });
 const DocsPanel = dynamic(() => import("@/components/DocsPanel").then(m => m.DocsPanel), { ssr: false });
 
-import StatusBadge    from "@/components/StatusBadge";
-import ViewSwitcher   from "@/components/ViewSwitcher";
-import VideoTile      from "@/components/VideoTile";
-import ControlBar     from "@/components/ControlBar";
-import ChatPanel      from "@/components/ChatPanel";
+import StatusBadge     from "@/components/StatusBadge";
+import ViewSwitcher    from "@/components/ViewSwitcher";
+import VideoTile       from "@/components/VideoTile";
+import ControlBar      from "@/components/ControlBar";
+import ChatPanel       from "@/components/ChatPanel";
 import PresenceSidebar from "@/components/PresenceSidebar";
 import LogoutButton    from "@/components/LogoutButton";
+import AISummaryPanel  from "@/components/AISummaryPanel";  // ← NEW
 
 export default function Room() {
   const { roomId } = useParams();
@@ -39,6 +40,7 @@ export default function Room() {
   const [isMicOn, setIsMicOn]             = useState(true);
   const [isCameraOn, setIsCameraOn]       = useState(true);
   const [view, setView]                   = useState("video");
+  const [isAISummaryOpen, setIsAISummaryOpen] = useState(false);  // ← NEW
 
   // ── Waiting room state ──
   const [waitStatus, setWaitStatus]     = useState("idle");
@@ -203,7 +205,7 @@ export default function Room() {
           if (ydocRef.current) {
             const fullState = Y.encodeStateAsUpdate(ydocRef.current);
             const k = roomKeysRef.current[peerId];
-            // Syncs docs + whiteboard state — chat intentionally excluded
+            // Syncs docs + whiteboard — chat intentionally excluded
             if (k && fullState.length > 0) {
               sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
             }
@@ -232,7 +234,7 @@ export default function Room() {
       }
 
       case "yjs-update": {
-        // Applies docs + whiteboard updates — chat is not in the Yjs doc
+        // Applies docs + whiteboard — chat is not in the Yjs doc
         if (!key) return;
         try {
           const d = await decrypt(key, msg.payload);
@@ -405,7 +407,6 @@ export default function Room() {
       const fullState = Y.encodeStateAsUpdate(ydocRef.current);
       for (const id of Object.keys(dcsRef.current)) {
         const k = roomKeysRef.current[id];
-        // Chat is intentionally NOT included — only docs + whiteboard sync
         if (k && fullState.length > 0) sendTo(id, "yjs-update", await encrypt(k, Array.from(fullState)));
       }
       broadcastAwareness();
@@ -468,14 +469,9 @@ export default function Room() {
   //  HANDLERS
   // ══════════════════════════════════════════
   const sendEncryptedChat = async (text) => {
-    // Chat is ephemeral — stored in React state only, not persisted to Yjs/IndexedDB
     const id = `${socket.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const message = { id, text, sender: roleRef.current ?? "?", timestamp: Date.now() };
-
-    // Add to local React state immediately
     setMessages(p => [...p, message]);
-
-    // Encrypt and send to all connected peers
     for (const peerId of Object.keys(dcsRef.current)) {
       const k = roomKeysRef.current[peerId];
       if (k) sendTo(peerId, "chat", await encrypt(k, message));
@@ -682,7 +678,7 @@ export default function Room() {
           >
             <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: "#eab308", boxShadow: "0 0 6px #eab308" }} />
             <span style={{ fontSize: "12px", fontWeight: "600", color: "#eab308" }}>
-              You're offline — whiteboard & doc edits are saved locally and will sync when you reconnect
+              You're offline — whiteboard &amp; doc edits are saved locally and will sync when you reconnect
             </span>
           </motion.div>
         )}
@@ -715,6 +711,27 @@ export default function Room() {
               <span style={{ fontSize: "12px", fontWeight: "600", color: "#818cf8", textTransform: "capitalize" }}>{role}</span>
             </div>
             <ViewSwitcher view={view} setView={setView} />
+
+            {/* ── AI Summary button ── */}
+            <button
+              onClick={() => setIsAISummaryOpen(v => !v)}
+              className="flex items-center gap-1.5 cursor-pointer"
+              style={{
+                padding: "7px 14px", borderRadius: "8px",
+                border: `1px solid ${isAISummaryOpen ? "rgba(139,92,246,.4)" : "rgba(255,255,255,.08)"}`,
+                background: isAISummaryOpen
+                  ? "rgba(139,92,246,.18)"
+                  : "linear-gradient(135deg,rgba(99,102,241,.08),rgba(139,92,246,.08))",
+                color: isAISummaryOpen ? "#a78bfa" : "#64748b",
+                fontSize: "12px", fontWeight: "600",
+                boxShadow: isAISummaryOpen ? "0 0 12px rgba(139,92,246,.2)" : "none",
+                transition: "all 0.15s",
+              }}
+            >
+              <Sparkles size={13} />
+              AI Summary
+            </button>
+
             <button
               onClick={() => setIsChatOpen(!isChatOpen)}
               className="flex items-center gap-1.5 cursor-pointer"
@@ -807,6 +824,14 @@ export default function Room() {
       </div>
 
       <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={messages} users={users} role={role} onSend={sendEncryptedChat} />
+
+      {/* ── AI Summary slide-in panel ── */}
+      <AISummaryPanel
+        ydocRef={ydocRef}
+        isOpen={isAISummaryOpen}
+        onClose={() => setIsAISummaryOpen(false)}
+        roomId={roomId}
+      />
 
       <AnimatePresence>
         {joinRequests.length > 0 && (
