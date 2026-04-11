@@ -48,6 +48,8 @@ Be concise. Use plain language. Do not invent content not present in the source 
     const stream = await client.messages.stream({
       
 model: "llama-3.3-70b-versatile",
+
+
       max_tokens: 1024,
       messages: [{ role: "user", content: userPrompt }],
     });
