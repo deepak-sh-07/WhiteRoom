@@ -1,95 +1,48 @@
 "use client";
 // components/AISummaryPanel.jsx
-// ─────────────────────────────
-// Slide-in panel that streams an AI summary of the current
-// docs + whiteboard content. Pass it the Yjs doc ref and it
-// extracts text itself — zero extra wiring needed in Room.jsx
-// beyond the single <AISummaryPanel> tag.
-//
-// Props:
-//   ydocRef   – React ref pointing at the shared Y.Doc
-//   isOpen    – boolean controlling visibility
-//   onClose   – () => void
-//   roomId    – string (used as panel subtitle)
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Sparkles, RefreshCw, Copy, Check, FileText, Layout } from "lucide-react";
+import { X, Sparkles, RefreshCw, Copy, Check, FileText } from "lucide-react";
 
-// ─── helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Extract plain text from the Yjs doc.
- * Handles both Tiptap/ProseMirror (Y.XmlFragment "prosemirror")
- * and plain Y.Text "content" patterns commonly used by Yjs editors.
- */
+// ─── Extract plain text from TipTap's Y.XmlFragment("tiptap-doc") ──
 function extractDocsText(ydoc) {
   if (!ydoc) return "";
-
-  // Try Tiptap / Hocuspocus convention: Y.XmlFragment named "prosemirror"
   try {
-    const xml = ydoc.get("prosemirror", null);
-    if (xml && typeof xml.toString === "function") {
-      // Strip XML tags, collapse whitespace
-      return xml.toString().replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    }
-  } catch {}
+    const fragment = ydoc.getXmlFragment("tiptap-doc");
+    if (!fragment || fragment.length === 0) return "";
 
-  // Try plain Y.Text named "content"
-  try {
-    const txt = ydoc.getText("content");
-    if (txt) return txt.toString().trim();
-  } catch {}
-
-  // Try Y.Text named "document"
-  try {
-    const txt = ydoc.getText("document");
-    if (txt) return txt.toString().trim();
-  } catch {}
-
-  return "";
-}
-
-/**
- * Extract whiteboard strokes as a human-readable description.
- * WhiteboardPanel typically stores strokes in a Y.Array named "strokes"
- * or "whiteboard". We describe the content quantitatively since raw
- * stroke coords aren't human-readable.
- */
-function extractWhiteboardText(ydoc) {
-  if (!ydoc) return "";
-
-  const names = ["strokes", "whiteboard", "canvas"];
-  for (const name of names) {
-    try {
-      const arr = ydoc.getArray(name);
-      if (arr && arr.length > 0) {
-        // Collect any text-type strokes (text tool annotations)
-        const textAnnotations = [];
-        for (const stroke of arr.toArray()) {
-          if (stroke?.type === "text" && stroke?.text) {
-            textAnnotations.push(stroke.text);
-          }
-          // Some whiteboard libs store label/note fields
-          if (stroke?.label) textAnnotations.push(stroke.label);
-          if (stroke?.note)  textAnnotations.push(stroke.note);
-        }
-        const count = arr.length;
-        const textPart = textAnnotations.length > 0
-          ? `\nText annotations on whiteboard:\n${textAnnotations.join("\n")}`
-          : "";
-        return `Whiteboard contains ${count} drawn element${count !== 1 ? "s" : ""}.${textPart}`;
+    // Recursively walk the XML tree and collect text
+    function walk(node) {
+      if (!node) return "";
+      // Text node
+      if (typeof node.toString === "function" && node.constructor?.name === "YXmlText") {
+        return node.toString();
       }
-    } catch {}
-  }
+      // Element node — recurse into children
+      if (typeof node.toArray === "function") {
+        const children = node.toArray();
+        const childText = children.map(walk).join("");
+        // Add newline after block-level elements
+        const tag = node.nodeName?.toLowerCase?.() ?? "";
+        const isBlock = ["paragraph", "heading", "blockquote", "listitem",
+                         "bulletlist", "orderedlist", "codeblock", "horizontalrule"].includes(tag);
+        return isBlock ? childText + "\n" : childText;
+      }
+      return "";
+    }
 
-  return "";
+    const text = walk(fragment).replace(/\n{3,}/g, "\n\n").trim();
+    return text;
+  } catch (e) {
+    console.error("[AISummaryPanel] extractDocsText error:", e);
+    return "";
+  }
 }
 
-// ─── markdown-ish renderer (no external dep) ────────────────────────────────
+// ─── Minimal markdown renderer (no external dep) ─────────────────
 function renderMarkdown(text) {
   if (!text) return null;
-
   const lines = text.split("\n");
   const elements = [];
   let key = 0;
@@ -97,7 +50,6 @@ function renderMarkdown(text) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Bold headers like **📋 Overview**
     if (/^\*\*.*\*\*$/.test(line.trim())) {
       const content = line.trim().replace(/^\*\*|\*\*$/g, "");
       elements.push(
@@ -112,7 +64,6 @@ function renderMarkdown(text) {
       continue;
     }
 
-    // Bullet points
     if (/^[-•*] /.test(line.trim())) {
       const content = line.trim().replace(/^[-•*] /, "");
       elements.push(
@@ -126,50 +77,42 @@ function renderMarkdown(text) {
       continue;
     }
 
-    // Empty line → spacer
     if (line.trim() === "") {
       elements.push(<div key={key++} style={{ height: "6px" }} />);
       continue;
     }
 
-    // Normal paragraph
     elements.push(
       <p key={key++} style={{ fontSize: "13px", color: "#94a3b8", lineHeight: "20px", margin: "0 0 4px" }}>
         {renderInline(line)}
       </p>
     );
   }
-
   return elements;
 }
 
 function renderInline(text) {
-  // Handle **bold** inline
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((part, i) => {
-    if (/^\*\*[^*]+\*\*$/.test(part)) {
-      return <strong key={i} style={{ color: "#cbd5e1", fontWeight: "600" }}>{part.slice(2, -2)}</strong>;
-    }
-    return part;
-  });
+  return parts.map((part, i) =>
+    /^\*\*[^*]+\*\*$/.test(part)
+      ? <strong key={i} style={{ color: "#cbd5e1", fontWeight: "600" }}>{part.slice(2, -2)}</strong>
+      : part
+  );
 }
 
-// ─── component ──────────────────────────────────────────────────────────────
-
+// ─── Component ────────────────────────────────────────────────────
 export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
-  const [summary, setSummary]     = useState("");
-  const [status, setStatus]       = useState("idle"); // idle | loading | done | error
-  const [errorMsg, setErrorMsg]   = useState("");
-  const [copied, setCopied]       = useState(false);
-  const [sourceInfo, setSourceInfo] = useState({ hasDoc: false, hasWb: false });
-  const abortRef = useRef(null);
+  const [summary, setSummary]   = useState("");
+  const [status, setStatus]     = useState("idle"); // idle | loading | done | error
+  const [errorMsg, setErrorMsg] = useState("");
+  const [copied, setCopied]     = useState(false);
+  const [hasContent, setHasContent] = useState(false);
+  const abortRef  = useRef(null);
   const scrollRef = useRef(null);
 
-  // Auto-scroll as tokens stream in
+  // Auto-scroll while streaming
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [summary]);
 
   const runSummary = useCallback(async () => {
@@ -180,20 +123,15 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
     setStatus("loading");
     setErrorMsg("");
 
-    const ydoc = ydocRef?.current;
-    const docsText       = extractDocsText(ydoc);
-    const whiteboardText = extractWhiteboardText(ydoc);
-
-    setSourceInfo({
-      hasDoc: docsText.length > 0,
-      hasWb:  whiteboardText.length > 0,
-    });
+    const docsText = extractDocsText(ydocRef?.current);
+    setHasContent(docsText.length > 0);
 
     try {
       const res = await fetch("/api/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docsText, whiteboardText }),
+        // Only send docsText — whiteboard excluded entirely
+        body: JSON.stringify({ docsText, whiteboardText: "" }),
         signal: abortRef.current.signal,
       });
 
@@ -202,7 +140,7 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
         throw new Error(err.error ?? "Request failed");
       }
 
-      const reader = res.body.getReader();
+      const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -227,7 +165,6 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
           }
         }
       }
-
       setStatus("done");
     } catch (err) {
       if (err.name === "AbortError") return;
@@ -236,11 +173,9 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
     }
   }, [ydocRef]);
 
-  // Auto-run when panel opens
+  // Auto-run when panel opens, reset when it closes
   useEffect(() => {
-    if (isOpen && status === "idle") {
-      runSummary();
-    }
+    if (isOpen && status === "idle") runSummary();
     if (!isOpen) {
       abortRef.current?.abort();
       setStatus("idle");
@@ -273,7 +208,7 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
             }}
           />
 
-          {/* Slide-in panel */}
+          {/* Panel */}
           <motion.aside
             key="ai-panel"
             initial={{ x: "100%", opacity: 0 }}
@@ -297,14 +232,13 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
               borderBottom: "1px solid rgba(255,255,255,0.06)",
               flexShrink: 0,
             }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                   <div style={{
                     width: "32px", height: "32px", borderRadius: "9px",
                     background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
                     display: "flex", alignItems: "center", justifyContent: "center",
-                    boxShadow: "0 0 20px rgba(99,102,241,0.4)",
-                    flexShrink: 0,
+                    boxShadow: "0 0 20px rgba(99,102,241,0.4)", flexShrink: 0,
                   }}>
                     <Sparkles size={15} color="white" />
                   </div>
@@ -330,22 +264,29 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
                 </button>
               </div>
 
-              {/* Source badges */}
-              <div style={{ display: "flex", gap: "6px", marginTop: "10px", flexWrap: "wrap" }}>
-                <SourceBadge
-                  icon={<FileText size={11} />}
-                  label="Document"
-                  active={sourceInfo.hasDoc}
-                />
-                <SourceBadge
-                  icon={<Layout size={11} />}
-                  label="Whiteboard"
-                  active={sourceInfo.hasWb}
-                />
+              {/* Source badge — docs only */}
+              <div style={{ marginTop: "12px" }}>
+                <div style={{
+                  display: "inline-flex", alignItems: "center", gap: "5px",
+                  padding: "3px 9px", borderRadius: "6px",
+                  background: hasContent ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${hasContent ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
+                  color: hasContent ? "#818cf8" : "#334155",
+                  fontSize: "11px", fontWeight: "600",
+                }}>
+                  <FileText size={11} />
+                  Document
+                  {hasContent && (
+                    <div style={{
+                      width: "5px", height: "5px", borderRadius: "50%",
+                      background: "#6366f1", boxShadow: "0 0 6px rgba(99,102,241,0.8)",
+                    }} />
+                  )}
+                </div>
               </div>
             </div>
 
-            {/* Body — scrollable summary */}
+            {/* Scrollable body */}
             <div
               ref={scrollRef}
               style={{
@@ -354,9 +295,7 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
                 scrollbarColor: "rgba(99,102,241,0.2) transparent",
               }}
             >
-              {status === "loading" && summary === "" && (
-                <LoadingState />
-              )}
+              {status === "loading" && summary === "" && <LoadingState />}
 
               {status === "error" && (
                 <div style={{
@@ -371,11 +310,7 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
               )}
 
               {summary && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  style={{ lineHeight: "1.6" }}
-                >
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ lineHeight: "1.6" }}>
                   {renderMarkdown(summary)}
                   {status === "loading" && (
                     <span style={{
@@ -389,13 +324,19 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
               )}
 
               {status === "done" && !summary && (
-                <p style={{ fontSize: "13px", color: "#475569", textAlign: "center", marginTop: "40px" }}>
-                  Nothing to summarize yet — add content to the doc or whiteboard first.
-                </p>
+                <div style={{ textAlign: "center", marginTop: "40px" }}>
+                  <FileText size={32} style={{ color: "#1e293b", marginBottom: "12px" }} />
+                  <p style={{ fontSize: "13px", color: "#475569", margin: 0 }}>
+                    The document is empty.
+                  </p>
+                  <p style={{ fontSize: "12px", color: "#334155", marginTop: "6px" }}>
+                    Add some content in the Docs view, then regenerate.
+                  </p>
+                </div>
               )}
             </div>
 
-            {/* Footer actions */}
+            {/* Footer */}
             <div style={{
               padding: "14px 20px",
               borderTop: "1px solid rgba(255,255,255,0.06)",
@@ -409,14 +350,13 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
                   border: "1px solid rgba(99,102,241,0.3)",
                   background: status === "loading" ? "rgba(99,102,241,0.06)" : "rgba(99,102,241,0.12)",
                   color: status === "loading" ? "#475569" : "#818cf8",
-                  fontSize: "12px", fontWeight: "700", cursor: status === "loading" ? "not-allowed" : "pointer",
+                  fontSize: "12px", fontWeight: "700",
+                  cursor: status === "loading" ? "not-allowed" : "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
                   transition: "all 0.15s",
                 }}
               >
-                <RefreshCw size={13} style={{
-                  animation: status === "loading" ? "spin 1s linear infinite" : "none",
-                }} />
+                <RefreshCw size={13} style={{ animation: status === "loading" ? "spin 1s linear infinite" : "none" }} />
                 {status === "loading" ? "Summarizing…" : "Regenerate"}
               </button>
 
@@ -451,59 +391,27 @@ export default function AISummaryPanel({ ydocRef, isOpen, onClose, roomId }) {
   );
 }
 
-// ─── sub-components ──────────────────────────────────────────────────────────
-
-function SourceBadge({ icon, label, active }) {
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: "5px",
-      padding: "3px 9px", borderRadius: "6px",
-      background: active ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.03)",
-      border: `1px solid ${active ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
-      color: active ? "#818cf8" : "#334155",
-      fontSize: "11px", fontWeight: "600",
-      transition: "all 0.2s",
-    }}>
-      {icon}
-      {label}
-      {active && (
-        <div style={{
-          width: "5px", height: "5px", borderRadius: "50%",
-          background: "#6366f1",
-          boxShadow: "0 0 6px rgba(99,102,241,0.8)",
-        }} />
-      )}
-    </div>
-  );
-}
-
 function LoadingState() {
   const lines = [
-    { w: "70%", delay: "0s" },
-    { w: "55%", delay: "0.1s" },
-    { w: "80%", delay: "0.2s" },
-    { w: "40%", delay: "0.3s" },
-    { w: "65%", delay: "0.15s" },
-    { w: "50%", delay: "0.25s" },
+    { w: "70%", delay: "0s" }, { w: "55%", delay: "0.1s" },
+    { w: "80%", delay: "0.2s" }, { w: "40%", delay: "0.3s" },
+    { w: "65%", delay: "0.15s" }, { w: "50%", delay: "0.25s" },
   ];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px",
-      }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
         <div style={{
           width: "6px", height: "6px", borderRadius: "50%",
           background: "#6366f1", animation: "pulse 1.5s ease-in-out infinite",
         }} />
         <span style={{ fontSize: "12px", color: "#475569", fontWeight: "500" }}>
-          Analyzing session content…
+          Reading document…
         </span>
       </div>
       {lines.map((l, i) => (
         <div key={i} style={{
           height: "10px", borderRadius: "5px",
-          background: "rgba(99,102,241,0.08)",
-          width: l.w,
+          background: "rgba(99,102,241,0.08)", width: l.w,
           animation: `pulse 1.8s ${l.delay} ease-in-out infinite`,
         }} />
       ))}
