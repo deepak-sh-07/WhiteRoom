@@ -106,37 +106,52 @@ Think Google Meet × Notion × Miro, but everything is encrypted, offline-capabl
 
 ```
 whiteroom/
-├── app/
-│   ├── api/
+├── app/                              # Next.js App Router
+│   ├── api/                          # Serverless API routes
 │   │   ├── summarize/
-│   │   │   └── route.js          # AI summary endpoint (Groq streaming)
+│   │   │   └── route.js              # AI summary endpoint (Groq streaming)
 │   │   ├── snapshots/
-│   │   │   └── route.js          # Snapshot save/load/delete
+│   │   │   └── route.js              # Snapshot save / load / delete
 │   │   └── turn/
-│   │       └── route.js          # TURN server credentials
-│   └── room/
-│       └── [roomId]/
-│           └── page.jsx          # Main room — WebRTC, Yjs, socket wiring
+│   │       └── route.js              # TURN server credentials
+│   ├── create/                       # Create a new room
+│   │   └── page.js
+│   ├── join/                         # Join an existing room by code
+│   │   └── page.js
+│   ├── login/                        # Auth / username entry
+│   │   └── page.js
+│   ├── room/
+│   │   └── [roomId]/
+│   │       └── page.jsx              # Main room — WebRTC, Yjs, socket wiring
+│   ├── favicon.ico
+│   ├── globals.css
+│   ├── layout.js                     # Root layout + font imports
+│   └── page.js                       # Landing page
 │
-├── components/
-│   ├── AISummaryPanel.jsx        # Streaming AI summary slide-in panel
-│   ├── ChatPanel.jsx             # Encrypted ephemeral chat
-│   ├── ControlBar.jsx            # Mic / camera / leave controls
-│   ├── DocsPanel.jsx             # TipTap collaborative editor
-│   ├── LogoutButton.jsx
-│   ├── PresenceSidebar.jsx       # Live user list with mic/camera state
-│   ├── StatusBadge.jsx           # Online/offline indicator
-│   ├── VideoTile.jsx             # Single video tile component
-│   ├── ViewSwitcher.jsx          # Video / Whiteboard / Docs tabs
-│   └── WhiteboardPanel.jsx       # tldraw whiteboard with cursor overlay
+├── Backend/                          # Express + Socket.io signaling server
+│   └── index.js                      # Rooms, waiting queue, relay signaling
 │
-├── lib/
-│   ├── crypto.js                 # AES-GCM + RSA-OAEP helpers
-│   ├── socket.js                 # Socket.io client singleton
-│   └── sounds.js                 # Join / leave / knock audio
+├── components/                       # Shared React components
+│   ├── AISummaryPanel.jsx            # Streaming AI summary slide-in panel
+│   ├── ChatPanel.jsx                 # Encrypted ephemeral chat
+│   ├── ControlBar.jsx                # Mic / camera / leave controls
+│   ├── DocsPanel.jsx                 # TipTap collaborative rich-text editor
+│   ├── LogoutButton.jsx              # Session logout
+│   ├── PresenceSidebar.jsx           # Live user list with mic/camera state
+│   ├── StatusBadge.jsx               # Online / offline indicator
+│   ├── VideoTile.jsx                 # Single participant video tile
+│   ├── ViewSwitcher.jsx              # Video / Whiteboard / Docs tab bar
+│   └── WhiteboardPanel.jsx           # tldraw whiteboard + cursor overlay
 │
-└── server/
-    └── index.js                  # Express + Socket.io signaling server
+├── lib/                              # Shared utilities
+│   ├── crypto.js                     # AES-GCM + RSA-OAEP Web Crypto helpers
+│   ├── socket.js                     # Socket.io client singleton
+│   └── sounds.js                     # Join / leave / knock audio
+│
+├── prisma/                           # Database schema + migrations
+│   └── schema.prisma                 # Snapshot model
+│
+└── public/                           # Static assets
 ```
 
 ---
