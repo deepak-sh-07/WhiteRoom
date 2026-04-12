@@ -1,32 +1,17 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+
+export const runtime = "nodejs";  // ← fixes the build error
+
 export async function POST(req) {
   try {
     const body = await req.json();
-    const code = body.roomId; 
+    const code = body.roomId;
 
     if (typeof code !== "string" || !code.trim()) {
       return NextResponse.json(
         { message: "Valid room code is required" },
         { status: 400 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-        
       );
     }
 
