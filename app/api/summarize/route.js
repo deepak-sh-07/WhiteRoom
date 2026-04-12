@@ -1,4 +1,3 @@
-// app/api/summarize/route.js
 import Groq from "groq-sdk";
 
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
