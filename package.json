@@ -10,7 +10,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@prisma/client": "^7.7.0",
+    "@prisma/client": "^7.8.0",
     "@socket.io/redis-adapter": "^8.3.0",
     "@tiptap/extension-collaboration": "^3.20.0",
     "@tiptap/react": "^3.20.0",
@@ -41,7 +41,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "postcss": "^8.5.6",
-    "prisma": "^6.19.3",
+    "prisma": "^7.8.0",
     "tailwindcss": "^4.1.18"
   }
 }
