@@ -2,9 +2,9 @@ generator client {
   provider = "prisma-client-js"
   output   = "../node_modules/.prisma/client"
 }
+
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -43,7 +43,7 @@ model Snapshot {
   roomId    Int
   room      Room     @relation(fields: [roomId], references: [id])
   label     String
-  state     String   // base64-encoded Yjs state update
+  state     String
   createdAt DateTime @default(now())
 }
 
