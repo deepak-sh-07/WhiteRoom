@@ -1,5 +1,4 @@
 import { auth } from "./app/api/jwt/auth";
-export const runtime = "nodejs";
 export function proxy(req) {
   return auth(req);
 }
