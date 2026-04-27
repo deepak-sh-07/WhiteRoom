@@ -11,10 +11,8 @@ const REDIS_URL      = process.env.REDIS_URL    ?? "redis://localhost:6379";
 const app = express();
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
-// ── Health check endpoint (load balancer pings this) ──────────────
 app.get("/health", (req, res) => res.json({ status: "ok", pid: process.pid }));
 
-// ── Dev only: manually clear a stale room ────────────────────────
 app.delete("/dev/room/:roomId", async (req, res) => {
   const { roomId } = req.params;
   await clearHost(roomId);
@@ -38,7 +36,6 @@ pubClient.on("error", e => console.error("[redis:pub]", e.message));
 subClient.on("error", e => console.error("[redis:sub]", e.message));
 pubClient.on("connect", () => console.log("✅ Redis connected"));
 
-// Socket.io Redis adapter — makes all servers share socket events
 io.adapter(createAdapter(pubClient, subClient));
 
 // ── Redis key helpers ─────────────────────────────────────────────
@@ -98,7 +95,7 @@ async function clearSocketRoom(socketId) {
 }
 
 // ══════════════════════════════════════════
-//  RATE LIMITER — Redis backed
+//  RATE LIMITER
 // ══════════════════════════════════════════
 const RATE_LIMITS = {
   "join-request":  { max: 5,  windowMs: 60_000 },
@@ -113,10 +110,7 @@ async function checkLimit(socket, event) {
 
   const key = KEY.rateLimiter(socket.id, event);
   const count = await pubClient.incr(key);
-
-  if (count === 1) {
-    await pubClient.pexpire(key, limit.windowMs);
-  }
+  if (count === 1) await pubClient.pexpire(key, limit.windowMs);
 
   if (count > limit.max) {
     console.warn(`🚫 Rate limit hit — socket ${socket.id} on "${event}" (${count}/${limit.max})`);
@@ -128,20 +122,68 @@ async function checkLimit(socket, event) {
 }
 
 // ══════════════════════════════════════════
+//  SHARED LEAVE LOGIC
+//  Called from both "peer-left" event and
+//  "disconnect" event so neither path misses
+//  cleanup. Guards with a Redis lock so it
+//  only runs once even if both fire.
+// ══════════════════════════════════════════
+async function handleLeave(socket, roomId) {
+  if (!roomId) return;
+
+  // Lock prevents double-cleanup if both peer-left and disconnect fire
+  const lockKey = `whiteroom:leaving:${socket.id}`;
+  const locked  = await pubClient.set(lockKey, "1", "EX", 10, "NX");
+  if (!locked) {
+    console.log(`🔒 handleLeave already running for ${socket.id} — skipping`);
+    return;
+  }
+
+  console.log(`🚪 ${socket.id} leaving "${roomId}" (pid:${process.pid})`);
+
+  // Notify everyone else in the room
+  socket.to(roomId).emit("peer-left", { peerId: socket.id });
+  socket.leave(roomId);
+
+  // Clear host if this socket was host
+  const host = await getHost(roomId);
+  if (host === socket.id) {
+    await clearHost(roomId);
+    console.log(`👑 Host ${socket.id} left "${roomId}" — host cleared`);
+  }
+
+  // Clear socket → room mapping
+  await clearSocketRoom(socket.id);
+  socket.data.roomId = null;
+
+  // Clean up any pending join requests this socket had
+  const setKey     = KEY.pendingReqs(socket.id);
+  const pendingIds = await pubClient.smembers(setKey);
+  if (pendingIds.length) {
+    await pubClient.del([setKey, ...pendingIds.map(id => KEY.pendingReq(id))]);
+  }
+}
+
+// ══════════════════════════════════════════
 //  SOCKET.IO
 // ══════════════════════════════════════════
 io.on("connection", (socket) => {
   console.log(`🔌 Connected: ${socket.id} (pid:${process.pid})`);
+
+  // ── Explicit leave (back button, leave button, tab close) ────────
+  // Client emits this before disconnecting so we get a clean leave
+  // even if the disconnect event is delayed or lost.
+  socket.on("peer-left", async ({ roomId }) => {
+    const room = roomId ?? socket.data.roomId ?? await getSocketRoom(socket.id);
+    await handleLeave(socket, room);
+  });
 
   socket.on("join-request", async ({ roomId, name }) => {
     if (!await checkLimit(socket, "join-request")) return;
 
     let host = await getHost(roomId);
 
-    // ── Auto-heal stale host key ──────────────────────────────────
-    // If stored host socket is no longer connected (e.g. server crashed
-    // without clean disconnect), clear so next person becomes host
-    // instead of waiting forever.
+    // Auto-heal stale host key
     if (host && !io.sockets.sockets.get(host)) {
       console.log(`⚠️  Stale host key for "${roomId}" (${host}) — auto-clearing`);
       await clearHost(roomId);
@@ -167,9 +209,6 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join-approve", async ({ requestId }) => {
-    // ── Atomic Redis lock — prevents duplicate processing ─────────
-    // NX = only set if key does Not eXist — exactly one server wins
-    // even if host double-clicks or two servers race
     const locked = await pubClient.set(
       KEY.approveLock(requestId), "1", "EX", 10, "NX"
     );
@@ -185,16 +224,13 @@ io.on("connection", (socket) => {
     console.log(`✅ Host approved ${req.socketId} for "${req.roomId}"`);
 
     const joinerSocket = io.sockets.sockets.get(req.socketId);
-
     if (joinerSocket) {
       await admitToRoom(joinerSocket, req.roomId);
     } else {
-      // Joiner is on a different server — route via Redis adapter
       io.to(req.socketId).emit("join-admitted-internal", { roomId: req.roomId });
     }
   });
 
-  // Cross-server admit — fires when host and joiner are on different servers
   socket.on("join-admitted-internal", async ({ roomId }) => {
     await admitToRoom(socket, roomId);
   });
@@ -209,10 +245,10 @@ io.on("connection", (socket) => {
   });
 
   async function admitToRoom(sock, roomId) {
-    const room = io.sockets.adapter.rooms.get(roomId);
+    const room          = io.sockets.adapter.rooms.get(roomId);
     const existingPeers = room ? [...room].filter(id => id !== sock.id) : [];
-    const host = await getHost(roomId);
-    const isHost = !host;
+    const host          = await getHost(roomId);
+    const isHost        = !host;
 
     sock.join(roomId);
     sock.data.roomId = roomId;
@@ -220,8 +256,8 @@ io.on("connection", (socket) => {
 
     if (isHost) await setHost(roomId, sock.id);
 
-    sock.emit("role", { role: isHost ? "host" : "peer" });
-    sock.emit("room-peers", { peers: existingPeers });
+    sock.emit("role",         { role: isHost ? "host" : "peer" });
+    sock.emit("room-peers",   { peers: existingPeers });
     sock.emit("join-admitted");
 
     console.log(`${isHost ? "👑 HOST" : "👤 PEER"} ${sock.id} admitted to "${roomId}" | peers: [${existingPeers.join(", ")}] (pid:${process.pid})`);
@@ -246,33 +282,16 @@ io.on("connection", (socket) => {
     io.to(targetId).emit("ice-candidate", { candidate, fromId: socket.id });
   });
 
+  
   socket.on("disconnect", async () => {
     console.log(`❌ Disconnected: ${socket.id} (pid:${process.pid})`);
     const roomId = socket.data.roomId ?? await getSocketRoom(socket.id);
-
-    if (roomId) {
-      socket.to(roomId).emit("peer-left", { peerId: socket.id });
-
-      const host = await getHost(roomId);
-      if (host === socket.id) {
-        await clearHost(roomId);
-        console.log(`👑 Host ${socket.id} left "${roomId}" — host cleared`);
-      }
-    }
-
-    await clearSocketRoom(socket.id);
-
-    // O(1) cleanup using per-socket Set instead of keys() scan
-    const setKey = KEY.pendingReqs(socket.id);
-    const pendingIds = await pubClient.smembers(setKey);
-    if (pendingIds.length) {
-      await pubClient.del([
-        setKey,
-        ...pendingIds.map(id => KEY.pendingReq(id)),
-      ]);
-    }
+    await handleLeave(socket, roomId);
   });
 });
+
+
+
 
 const PORT = process.env.PORT ?? 3001;
 server.listen(PORT, () => console.log(`🚀 Signaling server on :${PORT} (pid:${process.pid})`));

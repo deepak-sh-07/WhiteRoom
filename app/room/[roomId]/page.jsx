@@ -20,7 +20,7 @@ import ControlBar      from "@/components/ControlBar";
 import ChatPanel       from "@/components/ChatPanel";
 import PresenceSidebar from "@/components/PresenceSidebar";
 import LogoutButton    from "@/components/LogoutButton";
-import AISummaryPanel  from "@/components/AISummaryPanel";  // ← NEW
+import AISummaryPanel  from "@/components/AISummaryPanel";
 
 export default function Room() {
   const { roomId } = useParams();
@@ -31,7 +31,7 @@ export default function Room() {
   const [role, setRole]                   = useState(null);
   const [msg, setMsg]                     = useState("");
   const [users, setUsers]                 = useState([]);
-  const [messages, setMessages]           = useState([]);   // ephemeral — in-memory only
+  const [messages, setMessages]           = useState([]);
   const [remoteStreams, setRemoteStreams]  = useState({});
   const [allPeerIds, setAllPeerIds]       = useState([]);
   const [isChatOpen, setIsChatOpen]       = useState(false);
@@ -40,7 +40,7 @@ export default function Room() {
   const [isMicOn, setIsMicOn]             = useState(true);
   const [isCameraOn, setIsCameraOn]       = useState(true);
   const [view, setView]                   = useState("video");
-  const [isAISummaryOpen, setIsAISummaryOpen] = useState(false);  // ← NEW
+  const [isAISummaryOpen, setIsAISummaryOpen] = useState(false);
 
   // ── Waiting room state ──
   const [waitStatus, setWaitStatus]     = useState("idle");
@@ -59,10 +59,51 @@ export default function Room() {
   const pendingIceRef  = useRef({});
   const ydocRef        = useRef(null);
   const awarenessRef   = useRef(null);
+  const blackTrackRef  = useRef(null);
+  const realTrackRef   = useRef(null);
 
   const joinRequestSentRef = useRef(false);
 
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
+
+  // ══════════════════════════════════════════
+  //  CLEANUP HELPER (used by leaveRoom + back button + beforeunload)
+  // ══════════════════════════════════════════
+  const cleanup = useCallback(() => {
+    Object.values(pcsRef.current).forEach(pc => pc.close());
+    pcsRef.current = {};
+    dcsRef.current = {};
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    localStreamRef.current = null;
+    blackTrackRef.current?.stop();
+    socket.emit("peer-left", { roomId: roomIdRef.current });
+    socket.disconnect();
+    playLeaveSound();
+  }, []);
+
+  // ══════════════════════════════════════════
+  //  BACK BUTTON — popstate fires when browser
+  //  already navigated back, so just clean up,
+  //  no router.push needed.
+  // ══════════════════════════════════════════
+  useEffect(() => {
+    const handlePopState = () => cleanup();
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [cleanup]);
+
+  // ══════════════════════════════════════════
+  //  TAB CLOSE / REFRESH — sendBeacon is more
+  //  reliable than fetch on page unload.
+  // ══════════════════════════════════════════
+  useEffect(() => {
+    const handleUnload = () => {
+      socket.emit("peer-left", { roomId: roomIdRef.current });
+      socket.disconnect();
+    };
+    window.addEventListener("beforeunload", handleUnload);
+    return () => window.removeEventListener("beforeunload", handleUnload);
+  }, []);
 
   // ══════════════════════════════════════════
   //  MEDIA
@@ -172,7 +213,6 @@ export default function Room() {
 
     switch (msg.type) {
       case "chat": {
-        // Chat is ephemeral — stored in React state only, never persisted
         if (!key) return;
         try {
           const d = await decrypt(key, msg.payload);
@@ -205,7 +245,6 @@ export default function Room() {
           if (ydocRef.current) {
             const fullState = Y.encodeStateAsUpdate(ydocRef.current);
             const k = roomKeysRef.current[peerId];
-            // Syncs docs + whiteboard — chat intentionally excluded
             if (k && fullState.length > 0) {
               sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
             }
@@ -234,7 +273,6 @@ export default function Room() {
       }
 
       case "yjs-update": {
-        // Applies docs + whiteboard — chat is not in the Yjs doc
         if (!key) return;
         try {
           const d = await decrypt(key, msg.payload);
@@ -246,8 +284,7 @@ export default function Room() {
   };
 
   // ══════════════════════════════════════════
-  //  YJS + INDEXEDDB PERSISTENCE
-  //  (docs + whiteboard only — chat excluded)
+  //  YJS + INDEXEDDB
   // ══════════════════════════════════════════
   const idbRef = useRef(null);
 
@@ -394,15 +431,15 @@ export default function Room() {
       setUsers(p => p.map(u => u.isLocal ? { ...u, role, name: role } : u));
     };
 
-    const onAdmitted  = () => { setWaitStatus("admitted"); playJoinSound(); };
-    const onRejected  = () => setWaitStatus("rejected");
+    const onAdmitted    = () => { setWaitStatus("admitted"); playJoinSound(); };
+    const onRejected    = () => setWaitStatus("rejected");
     const onJoinRequest = ({ requestId, peerId, name }) => {
       setJoinRequests(prev => prev.find(r => r.requestId === requestId) ? prev : [...prev, { requestId, peerId, name }]);
       playKnockSound();
     };
 
     const onReconnect = async () => {
-      console.log("[signaling] reconnected — re-syncing Yjs state (docs + whiteboard) to peers");
+      console.log("[signaling] reconnected — re-syncing Yjs state to peers");
       if (!ydocRef.current) return;
       const fullState = Y.encodeStateAsUpdate(ydocRef.current);
       for (const id of Object.keys(dcsRef.current)) {
@@ -495,9 +532,6 @@ export default function Room() {
     }
   };
 
-  const blackTrackRef = useRef(null);
-  const realTrackRef  = useRef(null);
-
   const toggleCamera = async () => {
     const stream = localStreamRef.current;
     if (!stream) return;
@@ -577,16 +611,12 @@ export default function Room() {
     return () => clearInterval(interval);
   }, []);
 
+  // ══════════════════════════════════════════
+  //  LEAVE ROOM (manual — button click)
+  //  Uses cleanup() then pushes to home.
+  // ══════════════════════════════════════════
   const leaveRoom = () => {
-    Object.values(pcsRef.current).forEach(pc => pc.close());
-    pcsRef.current = {};
-    dcsRef.current = {};
-    localStreamRef.current?.getTracks().forEach(t => t.stop());
-    localStreamRef.current = null;
-    blackTrackRef.current?.stop();
-    socket.emit("peer-left", { roomId });
-    socket.disconnect();
-    playLeaveSound();
+    cleanup();
     router.push("/");
   };
 
@@ -712,7 +742,6 @@ export default function Room() {
             </div>
             <ViewSwitcher view={view} setView={setView} />
 
-            {/* ── AI Summary button ── */}
             <button
               onClick={() => setIsAISummaryOpen(v => !v)}
               className="flex items-center gap-1.5 cursor-pointer"
@@ -825,7 +854,6 @@ export default function Room() {
 
       <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={messages} users={users} role={role} onSend={sendEncryptedChat} />
 
-      {/* ── AI Summary slide-in panel ── */}
       <AISummaryPanel
         ydocRef={ydocRef}
         isOpen={isAISummaryOpen}
