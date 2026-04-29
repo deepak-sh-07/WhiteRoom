@@ -1,37 +1,25 @@
-import prisma  from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 import bcrypt from "bcrypt";
-export async function POST(req, res) {
-    const body = await req.json();
 
-    const { email, password,name } = body;
+export async function POST(req) {
+  const { email, password, name } = await req.json();
 
-    let user = await prisma.user.findUnique({
-        where: {
-            email:email,
-        },
-    });
+  const existing = await prisma.user.findUnique({ where: { email } });
 
-    if (user) {
-        return NextResponse.json(
-            { message: "User found" },
-            { status: 404 }
-        );
-    }
-    else {
-        const hashed_paas = await bcrypt.hash(password,10); 
-        user = await prisma.user.create({
-            data: {
-                email,password:hashed_paas,name
-            }
-        })
-        return NextResponse.json(
-        { message: "User created successful", user:user },
-        { status: 200 }
-    );
-    }
+  if (existing) {
+    // ✅ Fixed: was returning 404, should be 409 Conflict
+    return NextResponse.json({ message: "Email already in use" }, { status: 409 });
+  }
 
+  const hashed = await bcrypt.hash(password, 10);
 
+  const user = await prisma.user.create({
+    data: { email, password: hashed, name },
+  });
 
-    
+  return NextResponse.json(
+    { message: "User created successfully", user: { id: user.id, name: user.name, email: user.email } },
+    { status: 201 }
+  );
 }
