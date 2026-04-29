@@ -98,11 +98,10 @@ export default function CreateRoom() {
   const [visible, setVisible] = useState(false);
 
   const generateCode = useCallback(() => {
-    const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
-    const noun = nouns[Math.floor(Math.random() * nouns.length)];
-    const num = Math.floor(Math.random() * 90 + 10);
-    setRoomCode(`${adj}-${noun}-${num}`);
-  }, []);
+  const timestamp = Date.now().toString(36); // base36 timestamp e.g. "lv3k9x"
+  const random = Math.random().toString(36).substring(2, 6); // 4 random chars e.g. "k4zw"
+  setRoomCode(`${timestamp}-${random}`); // e.g. "lv3k9x-k4zw"
+}, []);
 
   useEffect(() => {
     setTimeout(() => setVisible(true), 60);
