@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Lock, Shield, Clock, Globe } from "lucide-react";
 import ParticleCanvas from "@/components/ParticleCanvas";
@@ -26,7 +26,7 @@ const labelStyle = {
   marginBottom: 8,
 };
 
-function Input({ type = "text", placeholder, value, onChange, onKeyDown }) {
+function Input({ type = "text", placeholder, value, onChange, onKeyDown, extraStyle = {} }) {
   const [focused, setFocused] = useState(false);
   return (
     <input
@@ -48,6 +48,7 @@ function Input({ type = "text", placeholder, value, onChange, onKeyDown }) {
         boxSizing: "border-box",
         transition: "all 0.2s",
         boxShadow: focused ? "0 0 0 3px rgba(124,143,255,0.09)" : "none",
+        ...extraStyle,
       }}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
@@ -85,6 +86,9 @@ const shimmer = {
   background: "linear-gradient(90deg,transparent,rgba(124,143,255,0.9),rgba(77,217,220,0.9),transparent)",
 };
 
+const adjectives = ["swift","silent","cosmic","frozen","amber","crimson","neon","lunar","iron","velvet"];
+const nouns = ["orbit","cipher","vault","storm","nexus","prism","ghost","forge","pulse","relay"];
+
 export default function CreateRoom() {
   const router = useRouter();
   const [name, setName] = useState("");
@@ -93,7 +97,17 @@ export default function CreateRoom() {
   const [error, setError] = useState("");
   const [visible, setVisible] = useState(false);
 
-  useEffect(() => { setTimeout(() => setVisible(true), 60); }, []);
+  const generateCode = useCallback(() => {
+    const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+    const noun = nouns[Math.floor(Math.random() * nouns.length)];
+    const num = Math.floor(Math.random() * 90 + 10);
+    setRoomCode(`${adj}-${noun}-${num}`);
+  }, []);
+
+  useEffect(() => {
+    setTimeout(() => setVisible(true), 60);
+    generateCode();
+  }, []);
 
   const create = async () => {
     if (!name.trim() || !roomCode.trim()) { setError("Please fill in both fields."); return; }
@@ -105,8 +119,11 @@ export default function CreateRoom() {
         credentials: "include",
         body: JSON.stringify({ name, room_code: roomCode }),
       });
-      if (res.status === 200) router.push(`/room/${roomCode}`);
-      else setError("Failed to create room. Try again.");
+      if (res.status === 200 || res.status === 201) router.push(`/room/${roomCode}`);
+      else {
+        const data = await res.json();
+        setError(data.message ?? "Failed to create room. Try again.");
+      }
     } catch { setError("Network error. Try again."); }
     finally { setLoading(false); }
   };
@@ -124,16 +141,8 @@ export default function CreateRoom() {
       <div style={{ position: "fixed", top: "-20%", left: "-10%", width: 600, height: 600, borderRadius: "50%", background: "hsl(231,65%,50%)", opacity: 0.15, filter: "blur(130px)", pointerEvents: "none", zIndex: 0 }} />
       <div style={{ position: "fixed", bottom: "-20%", right: "-10%", width: 500, height: 500, borderRadius: "50%", background: "hsl(180,70%,40%)", opacity: 0.11, filter: "blur(130px)", pointerEvents: "none", zIndex: 0 }} />
 
-      {/* ✅ Logo — fixed top-left */}
-      <div style={{
-        position: "fixed",
-        top: 28,
-        left: 32,
-        zIndex: 50,
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-      }}>
+      {/* Logo */}
+      <div style={{ position: "fixed", top: 28, left: 32, zIndex: 50, display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{ width: 42, height: 42, borderRadius: 12, background: "linear-gradient(135deg,#5c6fd4,#3a4fc8)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 24px rgba(92,111,212,0.45)" }}>
           <Lock size={18} color="white" />
         </div>
@@ -151,13 +160,7 @@ export default function CreateRoom() {
         transition: "opacity 0.75s cubic-bezier(.16,1,.3,1), transform 0.75s cubic-bezier(.16,1,.3,1)",
       }}>
 
-        {/* Two-column grid */}
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 20,
-          alignItems: "start",
-        }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, alignItems: "start" }}>
 
           {/* ── LEFT: Create Form ── */}
           <div style={panelStyle}>
@@ -192,14 +195,37 @@ export default function CreateRoom() {
                   onKeyDown={e => e.key === "Enter" && create()}
                 />
               </div>
+
               <div>
                 <label style={labelStyle}>Room Code</label>
-                <Input
-                  placeholder="e.g. design-sync-01"
-                  value={roomCode}
-                  onChange={e => setRoomCode(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && create()}
-                />
+                <div style={{ position: "relative" }}>
+                  <Input
+                    placeholder="e.g. design-sync-01"
+                    value={roomCode}
+                    onChange={e => setRoomCode(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && create()}
+                    extraStyle={{ paddingRight: 110 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={generateCode}
+                    style={{
+                      position: "absolute", right: 8, top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "rgba(124,143,255,0.12)",
+                      border: "1px solid rgba(124,143,255,0.25)",
+                      borderRadius: 8, padding: "6px 11px",
+                      cursor: "pointer", color: C.indigo,
+                      fontSize: 10, fontFamily: "ui-monospace,monospace",
+                      letterSpacing: "0.08em", fontWeight: 700,
+                      transition: "all 0.2s", whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = "rgba(124,143,255,0.24)"}
+                    onMouseLeave={e => e.currentTarget.style.background = "rgba(124,143,255,0.12)"}
+                  >
+                    ↻ RANDOM
+                  </button>
+                </div>
                 <p style={{ fontSize: 11, fontFamily: "ui-monospace,monospace", color: C.hint, marginTop: 7, lineHeight: 1.6 }}>
                   Share this code with anyone you want to invite. Codes are case-sensitive.
                 </p>
@@ -212,7 +238,7 @@ export default function CreateRoom() {
               </div>
             )}
 
-            {/* Button */}
+            {/* Submit */}
             <button
               onClick={create}
               disabled={loading}
@@ -269,7 +295,6 @@ export default function CreateRoom() {
               Why WhiteRoom
             </div>
 
-            {/* Features */}
             <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
               {features.map(f => (
                 <div key={f.label} style={{ display: "flex", alignItems: "flex-start", gap: 15 }}>
