@@ -5,6 +5,7 @@ import { createAdapter } from "@socket.io/redis-adapter";
 import Redis from "ioredis";
 import cors from "cors";
 
+// momnhcfg-4vlb
 const ALLOWED_ORIGIN = process.env.CLIENT_URL ?? "http://localhost:3000";
 const REDIS_URL      = process.env.REDIS_URL    ?? "redis://localhost:6379";
 

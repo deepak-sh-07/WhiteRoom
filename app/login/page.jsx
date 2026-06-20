@@ -127,6 +127,12 @@ export default function LoginPage() {
   const handleLogin = async () => {
     setError(""); setLoading(true);
     try {
+      const check = email.slice(-10);
+      if (check !== "@gmail.com") {
+        setError("Enter Valid mail");
+        return;
+      }
+      
       const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ email, password }) });
       const data = await res.json();
       if (res.status === 200) { sessionStorage.setItem("userName", data.name ?? email.split("@")[0]); window.location.href = "/"; }
