@@ -19,3 +19,4 @@ export async function GET(req) {
 
   return NextResponse.json({ user }, { status: 200 });
 }
+//Remove-Item -Recurse -Force .next

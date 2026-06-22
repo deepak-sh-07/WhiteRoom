@@ -122,17 +122,10 @@ async function checkLimit(socket, event) {
   return true;
 }
 
-// ══════════════════════════════════════════
-//  SHARED LEAVE LOGIC
-//  Called from both "peer-left" event and
-//  "disconnect" event so neither path misses
-//  cleanup. Guards with a Redis lock so it
-//  only runs once even if both fire.
-// ══════════════════════════════════════════
+
 async function handleLeave(socket, roomId) {
   if (!roomId) return;
 
-  // Lock prevents double-cleanup if both peer-left and disconnect fire
   const lockKey = `whiteroom:leaving:${socket.id}`;
   const locked  = await pubClient.set(lockKey, "1", "EX", 10, "NX");
   if (!locked) {
@@ -142,7 +135,7 @@ async function handleLeave(socket, roomId) {
 
   console.log(`🚪 ${socket.id} leaving "${roomId}" (pid:${process.pid})`);
 
-  // Notify everyone else in the room
+  // Notify everyone in the room
   socket.to(roomId).emit("peer-left", { peerId: socket.id });
   socket.leave(roomId);
 

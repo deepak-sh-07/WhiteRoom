@@ -60,16 +60,14 @@ export default function Room() {
   const ydocRef        = useRef(null);
   const awarenessRef   = useRef(null);
   const blackTrackRef  = useRef(null);
-  const realTrackRef   = useRef(null);
-
+  const realTrackRef = useRef(null);
+  const pendingYjsUpdatesRef = useRef([]); 
   const joinRequestSentRef = useRef(false);
 
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
 
-  // ══════════════════════════════════════════
-  //  CLEANUP HELPER (used by leaveRoom + back button + beforeunload)
-  // ══════════════════════════════════════════
-  const cleanup = useCallback(() => {
+  
+  const cleanup = useCallback(() => { //CLEANUP HELPER (used by leaveRoom + back button
     Object.values(pcsRef.current).forEach(pc => pc.close());
     pcsRef.current = {};
     dcsRef.current = {};
@@ -81,11 +79,7 @@ export default function Room() {
     playLeaveSound();
   }, []);
 
-  // ══════════════════════════════════════════
-  //  BACK BUTTON — popstate fires when browser
-  //  already navigated back, so just clean up,
-  //  no router.push needed.
-  // ══════════════════════════════════════════
+  
   useEffect(() => {
     const handlePopState = () => cleanup();
     window.addEventListener("popstate", handlePopState);
@@ -239,17 +233,26 @@ export default function Room() {
           }
         }
         if (msg.payload.action === "SET_KEY_SECURE") {
-          const raw = await decryptWithPrivateKey(rsaKeysRef.current[peerId].privateKey, msg.payload.key);
-          roomKeysRef.current[peerId] = await importKey(raw);
-          broadcastAwareness();
-          if (ydocRef.current) {
-            const fullState = Y.encodeStateAsUpdate(ydocRef.current);
-            const k = roomKeysRef.current[peerId];
-            if (k && fullState.length > 0) {
-              sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
-            }
-          }
-        }
+  const raw = await decryptWithPrivateKey(rsaKeysRef.current[peerId].privateKey, msg.payload.key);
+  roomKeysRef.current[peerId] = await importKey(raw);
+  broadcastAwareness();
+
+  const k = roomKeysRef.current[peerId];
+  if (k && pendingYjsUpdatesRef.current.length > 0) {
+    for (const update of pendingYjsUpdatesRef.current) {
+      sendTo(peerId, "yjs-update", await encrypt(k, update));
+    }
+    pendingYjsUpdatesRef.current = []; // clear after flush
+  }
+  // ───────────────────────────────────────────────
+
+  if (ydocRef.current) {
+    const fullState = Y.encodeStateAsUpdate(ydocRef.current);
+    if (k && fullState.length > 0) {
+      sendTo(peerId, "yjs-update", await encrypt(k, Array.from(fullState)));
+    }
+  }
+}
         break;
       }
 
@@ -306,13 +309,23 @@ export default function Room() {
     ydoc._awareness = awareness;
     setUsers([{ clientId: ydoc.clientID, role: "connecting", name: "connecting", color: "#a78bfa", isLocal: true }]);
 
-    ydoc.on("update", async (update, origin) => {
-      if (origin === "remote") return;
-      for (const id of Object.keys(dcsRef.current)) {
-        const k = roomKeysRef.current[id];
-        if (k) sendTo(id, "yjs-update", await encrypt(k, Array.from(update)));
-      }
-    });
+  ydoc.on("update", async (update, origin) => {
+  if (origin === "remote") return;
+  
+  let anySent = false;
+  for (const id of Object.keys(dcsRef.current)) {
+    const k = roomKeysRef.current[id];
+    if (k) {
+      sendTo(id, "yjs-update", await encrypt(k, Array.from(update)));
+      anySent = true;
+    }
+  }
+  
+  // Buffer if no keys ready yet
+  if (!anySent && Object.keys(dcsRef.current).length > 0) {
+    pendingYjsUpdatesRef.current.push(Array.from(update));
+  }
+});
 
     return () => {
       awareness.destroy();
@@ -321,9 +334,8 @@ export default function Room() {
     };
   }, []);
 
-  // ══════════════════════════════════════════
+ 
   //  SOCKET / SIGNALING
-  // ══════════════════════════════════════════
   useEffect(() => {
     if (!roomId) return;
 
@@ -370,7 +382,7 @@ export default function Room() {
 
     const onPeerJoined = async ({ peerId }) => { await getMedia(); };
 
-    const onOffer = async ({ offer, fromId }) => {
+    const onOffer = async ({ offer, fromId }) => { //when other user gets the offer
       await getMedia();
       const existing = pcsRef.current[fromId];
       if (existing && existing.signalingState !== "stable") {
